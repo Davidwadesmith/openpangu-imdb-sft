@@ -29,7 +29,7 @@ def main():
                 "meta_prompt": [],
                 "data": [
                     {"role": "user", "content": "请判断以下文本的情感类别：" + row["text"]},
-                    {"role": "assistant", "content": "正面" if row["label"] else "负面"},
+                    {"role": "assistant", "content": "正⾏" if row["label"] else "负⾏"},
                 ],
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

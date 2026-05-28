@@ -30,14 +30,22 @@ cd "${MS_LLM_DIR}"
 
 torchrun --nproc_per_node=1 \
     posttrain_gpt.py \
+    --stage sft \
+    --finetune \
+    --is-instruction-dataset \
+    --use-mcore-models \
     --tensor-model-parallel-size 1 \
     --pipeline-model-parallel-size 1 \
+    --sequence-parallel \
     --num-layers 26 \
     --hidden-size 1536 \
     --ffn-hidden-size 6144 \
     --num-attention-heads 12 \
     --group-query-attention \
     --num-query-groups 6 \
+    --make-vocab-size-divisible-by 1 \
+    --padded-vocab-size 153376 \
+    --vocab-size 153376 \
     --max-position-embeddings "${SEQ_LENGTH}" \
     --seq-length "${SEQ_LENGTH}" \
     --micro-batch-size "${MBS}" \
@@ -49,33 +57,42 @@ torchrun --nproc_per_node=1 \
     --lr-warmup-iters 100 \
     --weight-decay 0.1 \
     --clip-grad 1.0 \
+    --adam-beta1 0.9 \
+    --adam-beta2 0.999 \
+    --initial-loss-scale 4096 \
+    --init-method-std 0.02 \
     --bf16 \
+    --seed 42 \
     --data-path "${CACHE_DIR}/sft_text_document" \
+    --split 100,0,0 \
     --tokenizer-type PretrainedFromHF \
-    --tokenizer-model "${MODEL_HF_DIR}" \
+    --tokenizer-name-or-path "${MODEL_HF_DIR}" \
+    --tokenizer-not-use-fast \
     --save-interval 500 \
     --save "${SFT_OUTPUT_DIR}" \
     --load "${CKPT_MCORE_DIR}" \
-    --log-interval 10 \
+    --log-interval 1 \
     --eval-interval 999999 \
     --eval-iters 0 \
     --no-load-optim \
     --no-load-rng \
-    --no-create-attention-mask-in-dataloader \
+    --no-gradient-accumulation-fusion \
     --add-qkv-bias \
     --add-dense-bias \
     --no-bias-swiglu-fusion \
+    --normalization RMSNorm \
     --norm-epsilon 1e-5 \
     --swiglu \
-    --position-embedding-type rope \
+    --use-rotary-position-embeddings \
     --rotary-percent 1.0 \
     --rotary-base 4000000 \
     --attention-dropout 0.0 \
     --hidden-dropout 0.0 \
+    --no-masked-softmax-fusion \
+    --attention-softmax-in-fp32 \
     --use-flash-attn \
-    --accumulate-allreduce-grads-in-fp32 \
-    --overlap-grad-reduce \
-    --overlap-param-gather \
+    --variable-seq-lengths \
+    --distributed-backend hccl \
     2>&1 | tee "${TRAIN_LOG}"
 
 echo "[train] 完成: checkpoint → ${SFT_OUTPUT_DIR}"

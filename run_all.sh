@@ -18,7 +18,14 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
 
 # ===== 路径配置 =====
-WYC_DIR="$(cd "$(dirname "$0")/../wyc" && pwd)"
+WYC_DIR="$(cd "$(dirname "$0")/../../wyc" && pwd)"
+
+# 验证共享目录是否存在
+if [ ! -d "${WYC_DIR}" ]; then
+    log_error "共享目录不存在: ${WYC_DIR}"
+    log_error "请确认 wyc 目录在正确的位置（/mnt/workspace/wyc/）"
+    exit 1
+fi
 MS_LLM_DIR="${WYC_DIR}/MindSpeed-LLM"
 MODEL_HF_DIR="${WYC_DIR}/openPangu-Embedded-1B-V1.1"
 DATA_DIR="${WYC_DIR}/data"

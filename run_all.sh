@@ -62,13 +62,17 @@ log_info "所有步骤将依次执行，出错即停..."
 # ============================================================
 env_setup() {
     log_info "Step 0/8: 检查 Python 环境..."
-    if python -c "import megatron" 2>/dev/null; then
-        log_warn "megatron 已安装，跳过环境初始化"
+
+    # 检查当前安装的 mindspeed 是否指向 wyc 目录
+    CURRENT_MS=$(python -c "import mindspeed; print(mindspeed.__file__)" 2>/dev/null || echo "")
+    if echo "${CURRENT_MS}" | grep -q "${MINDSPEED_DIR}"; then
+        log_warn "mindspeed 已指向 wyc 版本，跳过环境初始化"
         return
     fi
-    log_info "  安装 MindSpeed..."
+
+    log_info "  强制安装 wyc 版本的 MindSpeed..."
     pip install -e "${MINDSPEED_DIR}" --quiet
-    log_info "  安装 MindSpeed-LLM..."
+    log_info "  强制安装 wyc 版本的 MindSpeed-LLM..."
     pip install -e "${MS_LLM_DIR}" --quiet
     log_info "Step 0 完成: 环境就绪"
 }

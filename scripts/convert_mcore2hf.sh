@@ -38,12 +38,14 @@ python convert_ckpt.py \
     --params-dtype bf16 \
     --use-mcore-models
 
-# 拷贝 tokenizer 文件
-echo "  拷贝 tokenizer 文件..."
+# 拷贝 tokenizer 和模型配置文件
+echo "  拷贝 tokenizer/配置文件..."
 cp "${MODEL_HF_DIR}/tokenizer.model" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
 cp "${MODEL_HF_DIR}/tokenizer_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-cp "${MODEL_HF_DIR}/tokenization_openpangu_embedded.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-cp "${MODEL_HF_DIR}/vocab.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-cp "${MODEL_HF_DIR}/merges.txt" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+cp "${MODEL_HF_DIR}/tokenization_openpangu.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+cp "${MODEL_HF_DIR}/special_tokens_map.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+cp "${MODEL_HF_DIR}/generation_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+cp "${MODEL_HF_DIR}/configuration_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+cp "${MODEL_HF_DIR}/modeling_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
 
 echo "[convert:mcore2hf] 完成: ${CKPT_MG2HF_DIR}"

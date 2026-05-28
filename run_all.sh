@@ -133,16 +133,17 @@ step4_train() {
     cd "${MS_LLM_DIR}"
 
     # 使用 PostTrain 模式（因为加载了预训练 mcore 权重）
+    # 模型架构参数来自 openPangu-Embedded-1B-V1.1 的 config.json
     torchrun --nproc_per_node=1 \
         posttrain_gpt.py \
         --tensor-model-parallel-size 1 \
         --pipeline-model-parallel-size 1 \
-        --num-layers 16 \
-        --hidden-size 2048 \
-        --ffn-hidden-size 5632 \
-        --num-attention-heads 32 \
+        --num-layers 26 \
+        --hidden-size 1536 \
+        --ffn-hidden-size 6144 \
+        --num-attention-heads 12 \
         --group-query-attention \
-        --num-query-groups 4 \
+        --num-query-groups 6 \
         --max-position-embeddings "${SEQ_LENGTH}" \
         --seq-length "${SEQ_LENGTH}" \
         --micro-batch-size "${MBS}" \
@@ -156,9 +157,7 @@ step4_train() {
         --clip-grad 1.0 \
         --bf16 \
         --data-path "${CACHE_DIR}/sft_text_document" \
-        --vocab-file "${MODEL_HF_DIR}/vocab.json" \
-        --merge-file "${MODEL_HF_DIR}/merges.txt" \
-        --tokenizer-type GPT2BPETokenizer \
+        --tokenizer-type PretrainedFromHF \
         --tokenizer-model "${MODEL_HF_DIR}" \
         --save-interval 500 \
         --save "${SFT_OUTPUT_DIR}" \
@@ -174,11 +173,9 @@ step4_train() {
         --no-bias-swiglu-fusion \
         --norm-epsilon 1e-5 \
         --swiglu \
-        --disable-bias-linear \
-        --untie-embeddings-and-output-weights \
         --position-embedding-type rope \
         --rotary-percent 1.0 \
-        --rotary-base 1000000 \
+        --rotary-base 4000000 \
         --attention-dropout 0.0 \
         --hidden-dropout 0.0 \
         --use-flash-attn \
@@ -223,13 +220,15 @@ step5_convert_mcore2hf() {
         --use-mcore-models
     cd "${WORK_DIR}"
 
-    # 拷贝 tokenizer 文件到 mg2hf 目录
-    log_info "  拷贝 tokenizer 文件..."
+    # 拷贝 tokenizer 和模型配置文件到 mg2hf 目录
+    log_info "  拷贝 tokenizer/配置文件..."
     cp "${MODEL_HF_DIR}/tokenizer.model" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
     cp "${MODEL_HF_DIR}/tokenizer_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/tokenization_openpangu_embedded.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/vocab.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/merges.txt" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    cp "${MODEL_HF_DIR}/tokenization_openpangu.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    cp "${MODEL_HF_DIR}/special_tokens_map.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    cp "${MODEL_HF_DIR}/generation_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    cp "${MODEL_HF_DIR}/configuration_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    cp "${MODEL_HF_DIR}/modeling_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
 
     log_info "Step 5 完成: ${CKPT_MG2HF_DIR}"
 }

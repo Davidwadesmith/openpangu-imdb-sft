@@ -32,12 +32,12 @@ torchrun --nproc_per_node=1 \
     posttrain_gpt.py \
     --tensor-model-parallel-size 1 \
     --pipeline-model-parallel-size 1 \
-    --num-layers 16 \
-    --hidden-size 2048 \
-    --ffn-hidden-size 5632 \
-    --num-attention-heads 32 \
+    --num-layers 26 \
+    --hidden-size 1536 \
+    --ffn-hidden-size 6144 \
+    --num-attention-heads 12 \
     --group-query-attention \
-    --num-query-groups 4 \
+    --num-query-groups 6 \
     --max-position-embeddings "${SEQ_LENGTH}" \
     --seq-length "${SEQ_LENGTH}" \
     --micro-batch-size "${MBS}" \
@@ -51,9 +51,7 @@ torchrun --nproc_per_node=1 \
     --clip-grad 1.0 \
     --bf16 \
     --data-path "${CACHE_DIR}/sft_text_document" \
-    --vocab-file "${MODEL_HF_DIR}/vocab.json" \
-    --merge-file "${MODEL_HF_DIR}/merges.txt" \
-    --tokenizer-type GPT2BPETokenizer \
+    --tokenizer-type PretrainedFromHF \
     --tokenizer-model "${MODEL_HF_DIR}" \
     --save-interval 500 \
     --save "${SFT_OUTPUT_DIR}" \
@@ -69,11 +67,9 @@ torchrun --nproc_per_node=1 \
     --no-bias-swiglu-fusion \
     --norm-epsilon 1e-5 \
     --swiglu \
-    --disable-bias-linear \
-    --untie-embeddings-and-output-weights \
     --position-embedding-type rope \
     --rotary-percent 1.0 \
-    --rotary-base 1000000 \
+    --rotary-base 4000000 \
     --attention-dropout 0.0 \
     --hidden-dropout 0.0 \
     --use-flash-attn \

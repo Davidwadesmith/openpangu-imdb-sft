@@ -27,6 +27,7 @@ if [ ! -d "${WYC_DIR}" ]; then
     exit 1
 fi
 MS_LLM_DIR="${WYC_DIR}/MindSpeed-LLM"
+MINDSPEED_DIR="${WYC_DIR}/MindSpeed"
 MODEL_HF_DIR="${WYC_DIR}/openPangu-Embedded-1B-V1.1"
 DATA_DIR="${WYC_DIR}/data"
 DOWNLOADS_DIR="${WYC_DIR}/downloads"
@@ -55,6 +56,22 @@ mkdir -p "${CACHE_DIR}" "${CKPT_MCORE_DIR}" "${SFT_OUTPUT_DIR}" \
 log_info "工作目录: ${WORK_DIR}"
 log_info "共享目录: ${WYC_DIR}"
 log_info "所有步骤将依次执行，出错即停..."
+
+# ============================================================
+#  Step 0: 环境初始化（安装 MindSpeed / MindSpeed-LLM）
+# ============================================================
+env_setup() {
+    log_info "Step 0/8: 检查 Python 环境..."
+    if python -c "import megatron" 2>/dev/null; then
+        log_warn "megatron 已安装，跳过环境初始化"
+        return
+    fi
+    log_info "  安装 MindSpeed..."
+    pip install -e "${MINDSPEED_DIR}" --quiet
+    log_info "  安装 MindSpeed-LLM..."
+    pip install -e "${MS_LLM_DIR}" --quiet
+    log_info "Step 0 完成: 环境就绪"
+}
 
 # ============================================================
 #  Step 1: 数据格式转换（Parquet → JSONL）
@@ -314,6 +331,7 @@ main() {
 
     START_TIME=$(date +%s)
 
+    env_setup
     step1_prepare_data
     step2_preprocess
     step3_convert_hf2mcore

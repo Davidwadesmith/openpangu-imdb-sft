@@ -1,0 +1,23 @@
+# 缓存和输出目录（运行时生成）
+cache/
+ckpt/
+sft_output/
+results/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# 图片输出
+*.png
+*.jpg

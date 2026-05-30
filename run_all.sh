@@ -108,7 +108,7 @@ step2_preprocess() {
         --input "${DATA_DIR}" \
         --tokenizer-name-or-path "${MODEL_HF_DIR}" \
         --output-prefix "${CACHE_DIR}/sft" \
-        --workers 4 \
+        --workers 1 \
         --tokenizer-type PretrainedFromHF \
         --handler-name PanguInstructionHandler \
         --seq-length "${SEQ_LENGTH}"

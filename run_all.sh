@@ -31,6 +31,7 @@ RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
 LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
 
 MS_LLM_DIR=""  # env_setup 会设置
+export PYTHONPATH=""        # env_setup 会追加 MindSpeed/MindSpeed-LLM
 
 # HuggingFace 镜像
 HF_MIRROR="https://hf-mirror.com"
@@ -62,50 +63,33 @@ env_setup() {
     log_info "Step 0: 环境搭建"
     log_info "============================================="
 
-    # ---- 0a. 定位 MindSpeed / MindSpeed-LLM（系统已预装）----
-    log_info "--- 0a. 定位 MindSpeed / MindSpeed-LLM ---"
+    # ---- 0a. 获取 MindSpeed / MindSpeed-LLM（用 PYTHONPATH，避免 C 扩展编译失败）----
+    log_info "--- 0a. 获取 MindSpeed / MindSpeed-LLM ---"
 
-    # 清除之前可能失败留下的本地烂仓库（会干扰 import）
-    if [ -d "${WORK_DIR}/MindSpeed" ]; then
-        log_warn "删除本地 MindSpeed 副本（使用系统预装版本）..."
-        rm -rf "${WORK_DIR}/MindSpeed"
-    fi
-    if [ -d "${WORK_DIR}/MindSpeed-LLM" ]; then
-        log_warn "删除本地 MindSpeed-LLM 副本（使用系统预装版本）..."
-        rm -rf "${WORK_DIR}/MindSpeed-LLM"
-    fi
+    # 清除之前失败残留的本地烂仓库
+    rm -rf "${WORK_DIR}/MindSpeed" "${WORK_DIR}/MindSpeed-LLM"
 
-    # 使用 pip 定位系统安装的 mindspeed_llm
-    MS_LLM_DIR=$(python3 -c "
-import os, sys, subprocess
-try:
-    r = subprocess.run([sys.executable, '-m', 'pip', 'show', 'mindspeed-llm', '-f'],
-                       capture_output=True, text=True, timeout=10)
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line.startswith('Location:'):
-            loc = line.split(':',1)[1].strip()
-            # The pip package 'mindspeed-llm' typically installs convert_ckpt.py
-            # at the top level of its location
-            if os.path.isfile(os.path.join(loc, 'convert_ckpt.py')):
-                print(loc)
-                break
-except Exception:
-    pass
-" 2>/dev/null || echo "")
-
-    if [ -n "${MS_LLM_DIR}" ] && [ -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
-        log_info "系统 MindSpeed-LLM: ${MS_LLM_DIR}"
-    elif python -c "import mindspeed_llm" 2>/dev/null; then
-        MS_LLM_DIR=$(python -c "
+    # 尝试 import 已安装的 mindspeed_llm
+    if python3 -c "import mindspeed_llm" 2>/dev/null; then
+        MS_LLM_DIR=$(python3 -c "
 import mindspeed_llm, os
 d = os.path.dirname(os.path.dirname(mindspeed_llm.__file__))
 print(d)
 ")
-        log_info "系统 MindSpeed-LLM (import): ${MS_LLM_DIR}"
+        log_info "系统已安装 MindSpeed-LLM: ${MS_LLM_DIR}"
     else
-        log_error "未找到已安装的 MindSpeed-LLM"
-        exit 1
+        log_info "克隆 MindSpeed-LLM..."
+        git clone --depth 1 --branch 1.0.0 \
+            https://gitee.com/ascend/MindSpeed-LLM.git "${WORK_DIR}/MindSpeed-LLM"
+        MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"
+
+        log_info "克隆 MindSpeed..."
+        git clone --depth 1 \
+            https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed"
+
+        # 不 pip install -e（C 扩展编译会失败），用 PYTHONPATH 代替
+        export PYTHONPATH="${MS_LLM_DIR}:${WORK_DIR}/MindSpeed:${PYTHONPATH:-}"
+        log_info "PYTHONPATH 已设置"
     fi
 
     # ---- 0b. 下载 openPangu-1B 模型 ----

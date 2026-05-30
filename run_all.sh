@@ -31,7 +31,7 @@ RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
 LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
 
 MINDSPEED_DIR="${WORK_DIR}/MindSpeed"
-MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"
+MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"  # 默认值，env_setup 会覆盖
 
 # HuggingFace 镜像
 HF_MIRROR="https://hf-mirror.com"
@@ -65,16 +65,15 @@ env_setup() {
     log_info "Step 0: 环境搭建"
     log_info "============================================="
 
-    # ---- 0a. 检测 / 安装 MindSpeed + MindSpeed-LLM ----
-    log_info "--- 0a. 检查 MindSpeed / MindSpeed-LLM ---"
+    # ---- 0a. 定位 MindSpeed / MindSpeed-LLM（系统已预装，直接复用）----
+    log_info "--- 0a. 定位 MindSpeed / MindSpeed-LLM ---"
 
-    # 如果已安装的 mindspeed_llm 可以 import，就用它的路径
+    # 优先使用系统已安装的 MindSpeed-LLM（编译环境复杂，不自己装）
     INSTALLED_MS_LLM=$(python -c "
 import os
 try:
     import mindspeed_llm
     d = os.path.dirname(mindspeed_llm.__path__[0])
-    # 检查脚本是否存在
     if os.path.isfile(os.path.join(d, 'convert_ckpt.py')):
         print(d)
     else:
@@ -85,23 +84,13 @@ except ImportError:
 
     if [ -n "${INSTALLED_MS_LLM}" ]; then
         MS_LLM_DIR="${INSTALLED_MS_LLM}"
-        log_warn "使用已安装的 MindSpeed-LLM: ${MS_LLM_DIR}"
+        log_info "使用已安装的 MindSpeed-LLM: ${MS_LLM_DIR}"
     elif [ -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
-        log_warn "使用本地 MindSpeed-LLM: ${MS_LLM_DIR}"
+        log_info "使用本地 MindSpeed-LLM: ${MS_LLM_DIR}"
     else
-        log_info "克隆 MindSpeed-LLM 1.0.0..."
-        git clone --depth 1 --branch 1.0.0 \
-            https://gitee.com/ascend/MindSpeed-LLM.git "${MS_LLM_DIR}"
-
-        log_info "克隆 MindSpeed..."
-        git clone --depth 1 \
-            https://gitee.com/ascend/MindSpeed.git "${MINDSPEED_DIR}"
-
-        log_info "安装 MindSpeed..."
-        pip install -e "${MINDSPEED_DIR}" --quiet
-
-        log_info "安装 MindSpeed-LLM..."
-        pip install -e "${MS_LLM_DIR}" --quiet
+        log_error "未找到 MindSpeed-LLM"
+        log_error "请确认 mindspeed_llm 已安装并可以 import"
+        exit 1
     fi
 
     # ---- 0b. 下载 openPangu-1B 模型 ----

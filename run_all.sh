@@ -5,6 +5,9 @@ set -euo pipefail
 #  openPangu-1B IMDB 情感分类微调 — 一键运行脚本
 #  使用方法：bash run_all.sh
 #  服务器：昇腾 910B NPU
+#
+#  自行实现预处理，不依赖 wyc 中的 MindSpeed-LLM 代码。
+#  wyc 仅用于读取模型权重和数据集文件。
 # ============================================================
 
 # ===== 颜色输出 =====
@@ -18,22 +21,16 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
 
 # ===== 路径配置 =====
-WYC_DIR="$(cd "$(dirname "$0")/../../wyc" && pwd)"
-
-# 验证共享目录是否存在
-if [ ! -d "${WYC_DIR}" ]; then
-    log_error "共享目录不存在: ${WYC_DIR}"
-    log_error "请确认 wyc 目录在正确的位置（/mnt/workspace/wyc/）"
-    exit 1
-fi
-MS_LLM_DIR="${WYC_DIR}/MindSpeed-LLM"
-MINDSPEED_DIR="${WYC_DIR}/MindSpeed"
-MODEL_HF_DIR="${WYC_DIR}/openPangu-Embedded-1B-V1.1"
-DATA_DIR="${WYC_DIR}/data"
-DOWNLOADS_DIR="${WYC_DIR}/downloads"
-
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="${WORK_DIR}/scripts"
+
+# ----- 共享资源（仅读取模型权重和数据文件） -----
+WYC_DIR="$(cd "$(dirname "$0")/../../wyc" && pwd)"
+MODEL_HF_DIR="${WYC_DIR}/openPangu-Embedded-1B-V1.1"
+DOWNLOADS_DIR="${WYC_DIR}/downloads"
+DATA_JSONL="${WYC_DIR}/data/train_imdb.jsonl"
+
+# ----- 输出目录 -----
 CACHE_DIR="${WORK_DIR}/cache"
 CKPT_MCORE_DIR="${WORK_DIR}/ckpt/mcore"
 SFT_OUTPUT_DIR="${WORK_DIR}/sft_output"
@@ -42,40 +39,35 @@ RESULTS_DIR="${WORK_DIR}/results"
 LOGS_DIR="${WORK_DIR}/logs"
 
 # ===== 训练参数 =====
-LR="2e-5"
-GBS=16
-MBS=1
-SEQ_LENGTH=8192
-TRAIN_ITERS=1563
-PRECISION="bf16"
+LR="${LR:-2e-5}"
+GBS="${GBS:-16}"
+MBS="${MBS:-1}"
+SEQ_LENGTH="${SEQ_LENGTH:-8192}"
+TRAIN_ITERS="${TRAIN_ITERS:-1563}"  # 25000 / 16 ≈ 1 epoch
+
+# ===== 环境检测 =====
+# 从已安装的 Python 包定位 MindSpeed-LLM 脚本目录
+MS_LLM_DIR=$(python -c "
+import mindspeed_llm, os
+d = os.path.dirname(mindspeed_llm.__path__[0])
+print(d)
+" 2>/dev/null || echo "")
+
+if [ -z "${MS_LLM_DIR}" ] || [ ! -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
+    log_error "找不到 MindSpeed-LLM 安装目录（需要 convert_ckpt.py 等脚本）"
+    log_error "请先安装 MindSpeed-LLM: pip install -e /path/to/MindSpeed-LLM"
+    exit 1
+fi
+
+log_info "工作目录:    ${WORK_DIR}"
+log_info "共享目录:    ${WYC_DIR}"
+log_info "MindSpeed-LLM: ${MS_LLM_DIR}"
+log_info "模型目录:    ${MODEL_HF_DIR}"
+log_info "所有步骤将依次执行，出错即停..."
 
 # ===== 目录初始化 =====
 mkdir -p "${CACHE_DIR}" "${CKPT_MCORE_DIR}" "${SFT_OUTPUT_DIR}" \
          "${CKPT_MG2HF_DIR}" "${RESULTS_DIR}" "${LOGS_DIR}"
-
-log_info "工作目录: ${WORK_DIR}"
-log_info "共享目录: ${WYC_DIR}"
-log_info "所有步骤将依次执行，出错即停..."
-
-# ============================================================
-#  Step 0: 环境初始化（安装 MindSpeed / MindSpeed-LLM）
-# ============================================================
-env_setup() {
-    log_info "Step 0/8: 检查 Python 环境..."
-
-    # 检查当前安装的 mindspeed 是否指向 wyc 目录
-    CURRENT_MS=$(python -c "import mindspeed; print(mindspeed.__file__)" 2>/dev/null || echo "")
-    if echo "${CURRENT_MS}" | grep -q "${MINDSPEED_DIR}"; then
-        log_warn "mindspeed 已指向 wyc 版本，跳过环境初始化"
-        return
-    fi
-
-    log_info "  强制安装 wyc 版本的 MindSpeed..."
-    pip install -e "${MINDSPEED_DIR}" --quiet
-    log_info "  强制安装 wyc 版本的 MindSpeed-LLM..."
-    pip install -e "${MS_LLM_DIR}" --quiet
-    log_info "Step 0 完成: 环境就绪"
-}
 
 # ============================================================
 #  Step 1: 数据格式转换（Parquet → JSONL）
@@ -83,17 +75,21 @@ env_setup() {
 step1_prepare_data() {
     log_info "Step 1/8: 数据格式转换..."
 
-    if [ -f "${DATA_DIR}/train_imdb.jsonl" ]; then
+    if [ -f "${DATA_JSONL}" ]; then
         log_warn "train_imdb.jsonl 已存在，跳过数据转换"
         return
     fi
 
-    python "${SCRIPTS_DIR}/prepare_data.py"
-    log_info "Step 1 完成: ${DATA_DIR}/train_imdb.jsonl"
+    python "${SCRIPTS_DIR}/prepare_data.py" \
+        --input "${DOWNLOADS_DIR}/train-00000-of-00001.parquet" \
+        --output "${DATA_JSONL}"
+
+    log_info "Step 1 完成: ${DATA_JSONL}"
 }
 
 # ============================================================
 #  Step 2: 数据预处理（生成 .bin / .idx 缓存）
+#  使用自己的预处理脚本，不依赖 MindSpeed-LLM 的 preprocess_data.py
 # ============================================================
 step2_preprocess() {
     log_info "Step 2/8: 数据预处理..."
@@ -103,16 +99,11 @@ step2_preprocess() {
         return
     fi
 
-    cd "${MS_LLM_DIR}"
-    python preprocess_data.py \
-        --input "${DATA_DIR}" \
-        --tokenizer-name-or-path "${MODEL_HF_DIR}" \
+    python "${SCRIPTS_DIR}/preprocess.py" \
+        --input "${DATA_JSONL}" \
+        --tokenizer-path "${MODEL_HF_DIR}" \
         --output-prefix "${CACHE_DIR}/sft" \
-        --workers 1 \
-        --tokenizer-type PretrainedFromHF \
-        --handler-name PanguInstructionHandler \
         --seq-length "${SEQ_LENGTH}"
-    cd "${WORK_DIR}"
 
     log_info "Step 2 完成: ${CACHE_DIR}/sft_text_document.bin + .idx"
 }
@@ -128,8 +119,7 @@ step3_convert_hf2mcore() {
         return
     fi
 
-    cd "${MS_LLM_DIR}"
-    python convert_ckpt.py \
+    python "${MS_LLM_DIR}/convert_ckpt.py" \
         --model-type GPT \
         --load-model-type hf \
         --save-model-type mg \
@@ -140,29 +130,24 @@ step3_convert_hf2mcore() {
         --add-dense-bias \
         --target-tensor-parallel-size 1 \
         --target-pipeline-parallel-size 1 \
-        --params-dtype "${PRECISION}" \
+        --params-dtype bf16 \
         --use-mcore-models
-    cd "${WORK_DIR}"
 
     log_info "Step 3 完成: ${CKPT_MCORE_DIR}"
 }
 
 # ============================================================
 #  Step 4: SFT 训练
+#  模型架构参数来自 openPangu-Embedded-1B-V1.1 的 config.json
 # ============================================================
 step4_train() {
     log_info "Step 4/8: 启动 SFT 训练..."
     log_info "  LR=${LR}  GBS=${GBS}  MBS=${MBS}  Iters=${TRAIN_ITERS}  SeqLen=${SEQ_LENGTH}"
 
-    # 设置日志输出路径
     TRAIN_LOG="${LOGS_DIR}/tune_mcore_pangu_1b_full_ptd.log"
 
-    cd "${MS_LLM_DIR}"
-
-    # 基于 MindSpeed-LLM llama3 模板，适配 openPangu-1B 架构参数
-    # 模型架构参数来自 openPangu-Embedded-1B-V1.1 的 config.json
     torchrun --nproc_per_node=1 \
-        posttrain_gpt.py \
+        "${MS_LLM_DIR}/posttrain_gpt.py" \
         --stage sft \
         --finetune \
         --is-instruction-dataset \
@@ -228,8 +213,6 @@ step4_train() {
         --distributed-backend hccl \
         2>&1 | tee "${TRAIN_LOG}"
 
-    cd "${WORK_DIR}"
-
     log_info "Step 4 完成: 训练日志 → ${TRAIN_LOG}"
     log_info "  Checkpoint → ${SFT_OUTPUT_DIR}"
 }
@@ -240,7 +223,6 @@ step4_train() {
 step5_convert_mcore2hf() {
     log_info "Step 5/8: 权重转换 mcore → HF..."
 
-    # 找到最新的 checkpoint
     LATEST_CKPT=$(ls -d "${SFT_OUTPUT_DIR}"/iter_* 2>/dev/null | sort -V | tail -1)
     if [ -z "${LATEST_CKPT}" ]; then
         log_error "未找到 SFT checkpoint，请检查训练是否成功"
@@ -248,8 +230,7 @@ step5_convert_mcore2hf() {
     fi
     log_info "  使用 checkpoint: ${LATEST_CKPT}"
 
-    cd "${MS_LLM_DIR}"
-    python convert_ckpt.py \
+    python "${MS_LLM_DIR}/convert_ckpt.py" \
         --model-type GPT \
         --load-model-type mg \
         --save-model-type hf \
@@ -260,19 +241,16 @@ step5_convert_mcore2hf() {
         --add-dense-bias \
         --target-tensor-parallel-size 1 \
         --target-pipeline-parallel-size 1 \
-        --params-dtype "${PRECISION}" \
+        --params-dtype bf16 \
         --use-mcore-models
-    cd "${WORK_DIR}"
 
     # 拷贝 tokenizer 和模型配置文件到 mg2hf 目录
     log_info "  拷贝 tokenizer/配置文件..."
-    cp "${MODEL_HF_DIR}/tokenizer.model" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/tokenizer_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/tokenization_openpangu.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/special_tokens_map.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/generation_config.json" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/configuration_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    cp "${MODEL_HF_DIR}/modeling_openpangu_dense.py" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    for f in tokenizer.model tokenizer_config.json tokenization_openpangu.py \
+             special_tokens_map.json generation_config.json \
+             configuration_openpangu_dense.py modeling_openpangu_dense.py; do
+        cp "${MODEL_HF_DIR}/${f}" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+    done
 
     log_info "Step 5 完成: ${CKPT_MG2HF_DIR}"
 }
@@ -334,7 +312,6 @@ main() {
 
     START_TIME=$(date +%s)
 
-    env_setup
     step1_prepare_data
     step2_preprocess
     step3_convert_hf2mcore
@@ -353,7 +330,7 @@ main() {
     echo "  总耗时: $((DURATION / 60)) 分 $((DURATION % 60)) 秒"
     echo "============================================"
     echo "  输出文件:"
-    echo "    cache/          → 预处理缓存"
+    echo "    cache/          → 预处理缓存 (.bin/.idx)"
     echo "    ckpt/mcore/     → mcore 格式权重"
     echo "    sft_output/     → SFT 训练 checkpoint"
     echo "    ckpt/mg2hf/     → HF 格式微调模型（推理用）"

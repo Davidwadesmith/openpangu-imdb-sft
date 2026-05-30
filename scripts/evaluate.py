@@ -18,12 +18,12 @@ def main():
     total = 0
     correct = 0
 
-    for entry in lines:
-        label = int(entry["gt"])
+    for i, entry in enumerate(lines):
+        label = int(entry["label"])
         response = entry["response"].strip()
 
         if response not in ("负面", "正面"):
-            print(f"[WARN] 第 {total + 1} 条结果无效: {response}")
+            print(f"[WARN] 第 {i + 1} 条结果无效: '{response}'")
             continue
 
         pred = 0 if response == "负面" else 1

@@ -1,9 +1,16 @@
-# 缓存和输出目录（运行时生成）
+# 运行时生成的输出目录
 cache/
 ckpt/
 sft_output/
 results/
 logs/
+data/
+
+# 自动下载的资源（不提交到 git）
+model/
+downloads/
+MindSpeed/
+MindSpeed-LLM/
 
 # Python
 __pycache__/

@@ -2,12 +2,9 @@
 set -euo pipefail
 
 # ============================================================
-#  openPangu-1B IMDB 情感分类微调 — 一键运行脚本
+#  openPangu-1B IMDB 情感分类微调 — 一键运行脚本（完全自包含）
+#  自动下载：MindSpeed/MindSpeed-LLM、模型权重、IMDB 数据集
 #  使用方法：bash run_all.sh
-#  服务器：昇腾 910B NPU
-#
-#  自行实现预处理，不依赖 wyc 中的 MindSpeed-LLM 代码。
-#  wyc 仅用于读取模型权重和数据集文件。
 # ============================================================
 
 # ===== 颜色输出 =====
@@ -15,107 +12,177 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
-
 log_info()  { echo -e "${GREEN}[INFO]${NC}  $(date '+%H:%M:%S') $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
 
-# ===== 路径配置 =====
+# ===== 路径配置（全部在项目目录内）=====
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="${WORK_DIR}/scripts"
 
-# ----- 共享资源（仅读取模型权重和数据文件） -----
-WYC_DIR="$(cd "$(dirname "$0")/../../wyc" && pwd)"
-MODEL_HF_DIR="${WYC_DIR}/openPangu-Embedded-1B-V1.1"
-DOWNLOADS_DIR="${WYC_DIR}/downloads"
-DATA_JSONL="${WYC_DIR}/data/train_imdb.jsonl"
+MODEL_DIR="${WORK_DIR}/model"                  # HuggingFace 模型
+DOWNLOADS_DIR="${WORK_DIR}/downloads"          # IMDB parquet 文件
+DATA_DIR="${WORK_DIR}/data"                    # train_imdb.jsonl
+CACHE_DIR="${WORK_DIR}/cache"                  # 预处理 .bin/.idx
+CKPT_MCORE_DIR="${WORK_DIR}/ckpt/mcore"        # mcore 格式权重
+SFT_OUTPUT_DIR="${WORK_DIR}/sft_output"         # 训练 checkpoint
+CKPT_MG2HF_DIR="${WORK_DIR}/ckpt/mg2hf"         # HF 格式微调模型
+RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
+LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
 
-# ----- 输出目录 -----
-CACHE_DIR="${WORK_DIR}/cache"
-CKPT_MCORE_DIR="${WORK_DIR}/ckpt/mcore"
-SFT_OUTPUT_DIR="${WORK_DIR}/sft_output"
-CKPT_MG2HF_DIR="${WORK_DIR}/ckpt/mg2hf"
-RESULTS_DIR="${WORK_DIR}/results"
-LOGS_DIR="${WORK_DIR}/logs"
+MINDSPEED_DIR="${WORK_DIR}/MindSpeed"
+MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"
+
+# HuggingFace 镜像
+HF_MIRROR="https://hf-mirror.com"
+export HF_ENDPOINT="${HF_MIRROR}"
+
+# 模型和数据集标识
+MODEL_HF_ID="FreedomIntelligence/openPangu-Embedded-1B-V1.1"
+IMDB_TRAIN_URL="${HF_MIRROR}/datasets/stanfordnlp/imdb/resolve/main/data/train-00000-of-00001.parquet"
+IMDB_TEST_URL="${HF_MIRROR}/datasets/stanfordnlp/imdb/resolve/main/data/test-00000-of-00001.parquet"
 
 # ===== 训练参数 =====
 LR="${LR:-2e-5}"
 GBS="${GBS:-16}"
 MBS="${MBS:-1}"
 SEQ_LENGTH="${SEQ_LENGTH:-8192}"
-TRAIN_ITERS="${TRAIN_ITERS:-1563}"  # 25000 / 16 ≈ 1 epoch
-
-# ===== 环境检测 =====
-# 从已安装的 Python 包定位 MindSpeed-LLM 脚本目录
-MS_LLM_DIR=$(python -c "
-import mindspeed_llm, os
-d = os.path.dirname(mindspeed_llm.__path__[0])
-print(d)
-" 2>/dev/null || echo "")
-
-if [ -z "${MS_LLM_DIR}" ] || [ ! -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
-    log_error "找不到 MindSpeed-LLM 安装目录（需要 convert_ckpt.py 等脚本）"
-    log_error "请先安装 MindSpeed-LLM: pip install -e /path/to/MindSpeed-LLM"
-    exit 1
-fi
-
-log_info "工作目录:    ${WORK_DIR}"
-log_info "共享目录:    ${WYC_DIR}"
-log_info "MindSpeed-LLM: ${MS_LLM_DIR}"
-log_info "模型目录:    ${MODEL_HF_DIR}"
-log_info "所有步骤将依次执行，出错即停..."
+TRAIN_ITERS="${TRAIN_ITERS:-1563}"
 
 # ===== 目录初始化 =====
-mkdir -p "${CACHE_DIR}" "${CKPT_MCORE_DIR}" "${SFT_OUTPUT_DIR}" \
-         "${CKPT_MG2HF_DIR}" "${RESULTS_DIR}" "${LOGS_DIR}"
+mkdir -p "${DOWNLOADS_DIR}" "${DATA_DIR}" "${CACHE_DIR}" \
+         "${CKPT_MCORE_DIR}" "${SFT_OUTPUT_DIR}" "${CKPT_MG2HF_DIR}" \
+         "${RESULTS_DIR}" "${LOGS_DIR}"
+
+log_info "工作目录: ${WORK_DIR}"
+log_info "HF 镜像:   ${HF_MIRROR}"
+
+# ============================================================
+#  Step 0: 环境搭建（下载框架、模型、数据集）
+# ============================================================
+env_setup() {
+    log_info "============================================="
+    log_info "Step 0: 环境搭建"
+    log_info "============================================="
+
+    # ---- 0a. 检测 / 安装 MindSpeed + MindSpeed-LLM ----
+    log_info "--- 0a. 检查 MindSpeed / MindSpeed-LLM ---"
+
+    # 如果已安装的 mindspeed_llm 可以 import，就用它的路径
+    INSTALLED_MS_LLM=$(python -c "
+import os
+try:
+    import mindspeed_llm
+    d = os.path.dirname(mindspeed_llm.__path__[0])
+    # 检查脚本是否存在
+    if os.path.isfile(os.path.join(d, 'convert_ckpt.py')):
+        print(d)
+    else:
+        print('')
+except ImportError:
+    print('')
+" 2>/dev/null || echo "")
+
+    if [ -n "${INSTALLED_MS_LLM}" ]; then
+        MS_LLM_DIR="${INSTALLED_MS_LLM}"
+        log_warn "使用已安装的 MindSpeed-LLM: ${MS_LLM_DIR}"
+    elif [ -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
+        log_warn "使用本地 MindSpeed-LLM: ${MS_LLM_DIR}"
+    else
+        log_info "克隆 MindSpeed-LLM 1.0.0..."
+        git clone --depth 1 --branch 1.0.0 \
+            https://gitee.com/ascend/MindSpeed-LLM.git "${MS_LLM_DIR}"
+
+        log_info "克隆 MindSpeed..."
+        git clone --depth 1 \
+            https://gitee.com/ascend/MindSpeed.git "${MINDSPEED_DIR}"
+
+        log_info "安装 MindSpeed..."
+        pip install -e "${MINDSPEED_DIR}" --quiet
+
+        log_info "安装 MindSpeed-LLM..."
+        pip install -e "${MS_LLM_DIR}" --quiet
+    fi
+
+    # ---- 0b. 下载 openPangu-1B 模型 ----
+    log_info "--- 0b. 下载模型: ${MODEL_HF_ID} ---"
+    if [ -f "${MODEL_DIR}/config.json" ] && [ -f "${MODEL_DIR}/model.safetensors" ]; then
+        log_warn "模型已存在，跳过下载"
+    else
+        log_info "从 ${HF_MIRROR} 下载（约 2GB）..."
+        python "${SCRIPTS_DIR}/download_model.py" \
+            --model-id "${MODEL_HF_ID}" \
+            --save-dir "${MODEL_DIR}"
+        log_info "模型下载完成: ${MODEL_DIR}"
+    fi
+
+    # ---- 0c. 下载 IMDB 数据集 ----
+    log_info "--- 0c. 下载 IMDB 数据集 ---"
+    TRAIN_PQ="${DOWNLOADS_DIR}/train-00000-of-00001.parquet"
+    TEST_PQ="${DOWNLOADS_DIR}/test-00000-of-00001.parquet"
+
+    if [ -f "${TRAIN_PQ}" ] && [ -f "${TEST_PQ}" ]; then
+        log_warn "IMDB 数据集已存在，跳过下载"
+    else
+        log_info "下载训练集..."
+        wget -q --show-progress -O "${TRAIN_PQ}" "${IMDB_TRAIN_URL}" || \
+            curl -L -o "${TRAIN_PQ}" "${IMDB_TRAIN_URL}"
+        log_info "下载测试集..."
+        wget -q --show-progress -O "${TEST_PQ}" "${IMDB_TEST_URL}" || \
+            curl -L -o "${TEST_PQ}" "${IMDB_TEST_URL}"
+        log_info "数据集下载完成: ${DOWNLOADS_DIR}"
+    fi
+
+    log_info "Step 0 完成: 环境就绪"
+}
 
 # ============================================================
 #  Step 1: 数据格式转换（Parquet → JSONL）
 # ============================================================
 step1_prepare_data() {
-    log_info "Step 1/8: 数据格式转换..."
+    log_info "Step 1/8: 数据格式转换 (Parquet → JSONL)..."
 
-    if [ -f "${DATA_JSONL}" ]; then
-        log_warn "train_imdb.jsonl 已存在，跳过数据转换"
+    if [ -f "${DATA_DIR}/train_imdb.jsonl" ]; then
+        log_warn "train_imdb.jsonl 已存在，跳过"
         return
     fi
 
     python "${SCRIPTS_DIR}/prepare_data.py" \
         --input "${DOWNLOADS_DIR}/train-00000-of-00001.parquet" \
-        --output "${DATA_JSONL}"
+        --output "${DATA_DIR}/train_imdb.jsonl"
 
-    log_info "Step 1 完成: ${DATA_JSONL}"
+    log_info "Step 1 完成: ${DATA_DIR}/train_imdb.jsonl"
 }
 
 # ============================================================
-#  Step 2: 数据预处理（生成 .bin / .idx 缓存）
-#  使用自己的预处理脚本，不依赖 MindSpeed-LLM 的 preprocess_data.py
+#  Step 2: 数据预处理（tokenize → .bin / .idx）
 # ============================================================
 step2_preprocess() {
     log_info "Step 2/8: 数据预处理..."
 
-    if [ -f "${CACHE_DIR}/sft_text_document.bin" ] && [ -f "${CACHE_DIR}/sft_text_document.idx" ]; then
-        log_warn "缓存文件已存在，跳过预处理"
+    if [ -f "${CACHE_DIR}/sft_text_document.bin" ] && \
+       [ -f "${CACHE_DIR}/sft_text_document.idx" ]; then
+        log_warn "缓存已存在，跳过"
         return
     fi
 
     python "${SCRIPTS_DIR}/preprocess.py" \
-        --input "${DATA_JSONL}" \
-        --tokenizer-path "${MODEL_HF_DIR}" \
+        --input "${DATA_DIR}/train_imdb.jsonl" \
+        --tokenizer-path "${MODEL_DIR}" \
         --output-prefix "${CACHE_DIR}/sft" \
         --seq-length "${SEQ_LENGTH}"
 
-    log_info "Step 2 完成: ${CACHE_DIR}/sft_text_document.bin + .idx"
+    log_info "Step 2 完成"
 }
 
 # ============================================================
 #  Step 3: 模型权重转换 HF → mcore
 # ============================================================
 step3_convert_hf2mcore() {
-    log_info "Step 3/8: 权重转换 HF → mcore..."
+    log_info "Step 3/8: HF → mcore..."
 
     if [ -f "${CKPT_MCORE_DIR}/latest_checkpointed_iteration.txt" ]; then
-        log_warn "mcore 权重已存在，跳过转换"
+        log_warn "mcore 权重已存在，跳过"
         return
     fi
 
@@ -123,9 +190,9 @@ step3_convert_hf2mcore() {
         --model-type GPT \
         --load-model-type hf \
         --save-model-type mg \
-        --load-dir "${MODEL_HF_DIR}" \
+        --load-dir "${MODEL_DIR}" \
         --save-dir "${CKPT_MCORE_DIR}" \
-        --tokenizer-model "${MODEL_HF_DIR}" \
+        --tokenizer-model "${MODEL_DIR}" \
         --add-qkv-bias \
         --add-dense-bias \
         --target-tensor-parallel-size 1 \
@@ -133,18 +200,17 @@ step3_convert_hf2mcore() {
         --params-dtype bf16 \
         --use-mcore-models
 
-    log_info "Step 3 完成: ${CKPT_MCORE_DIR}"
+    log_info "Step 3 完成"
 }
 
 # ============================================================
 #  Step 4: SFT 训练
-#  模型架构参数来自 openPangu-Embedded-1B-V1.1 的 config.json
 # ============================================================
 step4_train() {
-    log_info "Step 4/8: 启动 SFT 训练..."
-    log_info "  LR=${LR}  GBS=${GBS}  MBS=${MBS}  Iters=${TRAIN_ITERS}  SeqLen=${SEQ_LENGTH}"
+    log_info "Step 4/8: SFT 训练"
+    log_info "  LR=${LR} GBS=${GBS} MBS=${MBS} Iters=${TRAIN_ITERS}"
 
-    TRAIN_LOG="${LOGS_DIR}/tune_mcore_pangu_1b_full_ptd.log"
+    TRAIN_LOG="${LOGS_DIR}/train.log"
 
     torchrun --nproc_per_node=1 \
         "${MS_LLM_DIR}/posttrain_gpt.py" \
@@ -184,7 +250,7 @@ step4_train() {
         --data-path "${CACHE_DIR}/sft_text_document" \
         --split 100,0,0 \
         --tokenizer-type PretrainedFromHF \
-        --tokenizer-name-or-path "${MODEL_HF_DIR}" \
+        --tokenizer-name-or-path "${MODEL_DIR}" \
         --tokenizer-not-use-fast \
         --save-interval 500 \
         --save "${SFT_OUTPUT_DIR}" \
@@ -213,22 +279,21 @@ step4_train() {
         --distributed-backend hccl \
         2>&1 | tee "${TRAIN_LOG}"
 
-    log_info "Step 4 完成: 训练日志 → ${TRAIN_LOG}"
-    log_info "  Checkpoint → ${SFT_OUTPUT_DIR}"
+    log_info "Step 4 完成: ${TRAIN_LOG}"
 }
 
 # ============================================================
-#  Step 5: 权重转换 mcore → HF（用于推理）
+#  Step 5: 权重转换 mcore → HF
 # ============================================================
 step5_convert_mcore2hf() {
-    log_info "Step 5/8: 权重转换 mcore → HF..."
+    log_info "Step 5/8: mcore → HF..."
 
     LATEST_CKPT=$(ls -d "${SFT_OUTPUT_DIR}"/iter_* 2>/dev/null | sort -V | tail -1)
     if [ -z "${LATEST_CKPT}" ]; then
-        log_error "未找到 SFT checkpoint，请检查训练是否成功"
+        log_error "未找到 SFT checkpoint"
         exit 1
     fi
-    log_info "  使用 checkpoint: ${LATEST_CKPT}"
+    log_info "  checkpoint: ${LATEST_CKPT}"
 
     python "${MS_LLM_DIR}/convert_ckpt.py" \
         --model-type GPT \
@@ -236,7 +301,7 @@ step5_convert_mcore2hf() {
         --save-model-type hf \
         --load-dir "${LATEST_CKPT}" \
         --save-dir "${CKPT_MG2HF_DIR}" \
-        --tokenizer-model "${MODEL_HF_DIR}" \
+        --tokenizer-model "${MODEL_DIR}" \
         --add-qkv-bias \
         --add-dense-bias \
         --target-tensor-parallel-size 1 \
@@ -244,41 +309,35 @@ step5_convert_mcore2hf() {
         --params-dtype bf16 \
         --use-mcore-models
 
-    # 拷贝 tokenizer 和模型配置文件到 mg2hf 目录
-    log_info "  拷贝 tokenizer/配置文件..."
+    log_info "拷贝 tokenizer/model 文件..."
     for f in tokenizer.model tokenizer_config.json tokenization_openpangu.py \
              special_tokens_map.json generation_config.json \
              configuration_openpangu_dense.py modeling_openpangu_dense.py; do
-        cp "${MODEL_HF_DIR}/${f}" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
+        cp "${MODEL_DIR}/${f}" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
     done
 
-    log_info "Step 5 完成: ${CKPT_MG2HF_DIR}"
+    log_info "Step 5 完成"
 }
 
 # ============================================================
 #  Step 6: 推理
 # ============================================================
 step6_inference() {
-    log_info "Step 6/8: 模型推理（在测试集上）..."
-
-    if [ ! -f "${DOWNLOADS_DIR}/test-00000-of-00001.parquet" ]; then
-        log_error "测试集文件不存在: ${DOWNLOADS_DIR}/test-00000-of-00001.parquet"
-        exit 1
-    fi
+    log_info "Step 6/8: 推理..."
 
     python "${SCRIPTS_DIR}/inference.py" \
         --model-path "${CKPT_MG2HF_DIR}" \
         --test-parquet "${DOWNLOADS_DIR}/test-00000-of-00001.parquet" \
         --output "${RESULTS_DIR}/test_imdb_results.jsonl"
 
-    log_info "Step 6 完成: ${RESULTS_DIR}/test_imdb_results.jsonl"
+    log_info "Step 6 完成"
 }
 
 # ============================================================
-#  Step 7: 评测准确率
+#  Step 7: 评测
 # ============================================================
 step7_evaluate() {
-    log_info "Step 7/8: 评测准确率..."
+    log_info "Step 7/8: 评测..."
 
     python "${SCRIPTS_DIR}/evaluate.py" \
         --input "${RESULTS_DIR}/test_imdb_results.jsonl"
@@ -293,7 +352,7 @@ step8_plot_loss() {
     log_info "Step 8/8: 绘制 loss 曲线..."
 
     python "${SCRIPTS_DIR}/plot_loss.py" \
-        --log-file "${LOGS_DIR}/tune_mcore_pangu_1b_full_ptd.log" \
+        --log-file "${LOGS_DIR}/train.log" \
         --output "${WORK_DIR}/loss_curve.png"
 
     log_info "Step 8 完成: ${WORK_DIR}/loss_curve.png"
@@ -312,6 +371,7 @@ main() {
 
     START_TIME=$(date +%s)
 
+    env_setup
     step1_prepare_data
     step2_preprocess
     step3_convert_hf2mcore
@@ -326,17 +386,8 @@ main() {
 
     echo ""
     echo "============================================"
-    echo -e "  ${GREEN}全部步骤完成!${NC}"
+    echo -e "  ${GREEN}全部完成!${NC}"
     echo "  总耗时: $((DURATION / 60)) 分 $((DURATION % 60)) 秒"
-    echo "============================================"
-    echo "  输出文件:"
-    echo "    cache/          → 预处理缓存 (.bin/.idx)"
-    echo "    ckpt/mcore/     → mcore 格式权重"
-    echo "    sft_output/     → SFT 训练 checkpoint"
-    echo "    ckpt/mg2hf/     → HF 格式微调模型（推理用）"
-    echo "    results/        → 推理结果 JSONL"
-    echo "    logs/           → 训练日志"
-    echo "    loss_curve.png  → Loss 曲线图"
     echo "============================================"
 }
 

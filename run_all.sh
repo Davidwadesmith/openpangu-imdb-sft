@@ -30,8 +30,7 @@ CKPT_MG2HF_DIR="${WORK_DIR}/ckpt/mg2hf"         # HF 格式微调模型
 RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
 LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
 
-MINDSPEED_DIR="${WORK_DIR}/MindSpeed"
-MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"  # 默认值，env_setup 会覆盖
+MS_LLM_DIR=""  # env_setup 会设置
 
 # HuggingFace 镜像
 HF_MIRROR="https://hf-mirror.com"
@@ -63,31 +62,49 @@ env_setup() {
     log_info "Step 0: 环境搭建"
     log_info "============================================="
 
-    # ---- 0a. 定位 MindSpeed / MindSpeed-LLM（系统已预装，直接复用）----
+    # ---- 0a. 定位 MindSpeed / MindSpeed-LLM（系统已预装）----
     log_info "--- 0a. 定位 MindSpeed / MindSpeed-LLM ---"
 
-    # 优先使用系统已安装的 MindSpeed-LLM（编译环境复杂，不自己装）
-    INSTALLED_MS_LLM=$(python -c "
-import os
+    # 清除之前可能失败留下的本地烂仓库（会干扰 import）
+    if [ -d "${WORK_DIR}/MindSpeed" ]; then
+        log_warn "删除本地 MindSpeed 副本（使用系统预装版本）..."
+        rm -rf "${WORK_DIR}/MindSpeed"
+    fi
+    if [ -d "${WORK_DIR}/MindSpeed-LLM" ]; then
+        log_warn "删除本地 MindSpeed-LLM 副本（使用系统预装版本）..."
+        rm -rf "${WORK_DIR}/MindSpeed-LLM"
+    fi
+
+    # 使用 pip 定位系统安装的 mindspeed_llm
+    MS_LLM_DIR=$(python3 -c "
+import os, sys, subprocess
 try:
-    import mindspeed_llm
-    d = os.path.dirname(mindspeed_llm.__path__[0])
-    if os.path.isfile(os.path.join(d, 'convert_ckpt.py')):
-        print(d)
-    else:
-        print('')
-except ImportError:
-    print('')
+    r = subprocess.run([sys.executable, '-m', 'pip', 'show', 'mindspeed-llm', '-f'],
+                       capture_output=True, text=True, timeout=10)
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('Location:'):
+            loc = line.split(':',1)[1].strip()
+            # The pip package 'mindspeed-llm' typically installs convert_ckpt.py
+            # at the top level of its location
+            if os.path.isfile(os.path.join(loc, 'convert_ckpt.py')):
+                print(loc)
+                break
+except Exception:
+    pass
 " 2>/dev/null || echo "")
 
-    if [ -n "${INSTALLED_MS_LLM}" ]; then
-        MS_LLM_DIR="${INSTALLED_MS_LLM}"
-        log_info "使用已安装的 MindSpeed-LLM: ${MS_LLM_DIR}"
-    elif [ -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
-        log_info "使用本地 MindSpeed-LLM: ${MS_LLM_DIR}"
+    if [ -n "${MS_LLM_DIR}" ] && [ -f "${MS_LLM_DIR}/convert_ckpt.py" ]; then
+        log_info "系统 MindSpeed-LLM: ${MS_LLM_DIR}"
+    elif python -c "import mindspeed_llm" 2>/dev/null; then
+        MS_LLM_DIR=$(python -c "
+import mindspeed_llm, os
+d = os.path.dirname(os.path.dirname(mindspeed_llm.__file__))
+print(d)
+")
+        log_info "系统 MindSpeed-LLM (import): ${MS_LLM_DIR}"
     else
-        log_error "未找到 MindSpeed-LLM"
-        log_error "请确认 mindspeed_llm 已安装并可以 import"
+        log_error "未找到已安装的 MindSpeed-LLM"
         exit 1
     fi
 

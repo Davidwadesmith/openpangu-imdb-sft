@@ -111,8 +111,7 @@ step2_preprocess() {
         --workers 4 \
         --tokenizer-type PretrainedFromHF \
         --handler-name PanguInstructionHandler \
-        --seq-length "${SEQ_LENGTH}" \
-        --pack
+        --seq-length "${SEQ_LENGTH}"
     cd "${WORK_DIR}"
 
     log_info "Step 2 完成: ${CACHE_DIR}/sft_text_document.bin + .idx"

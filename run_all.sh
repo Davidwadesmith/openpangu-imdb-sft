@@ -37,10 +37,8 @@ MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"  # 默认值，env_setup 会覆盖
 HF_MIRROR="https://hf-mirror.com"
 export HF_ENDPOINT="${HF_MIRROR}"
 
-# 模型和数据集标识
+# 模型标识
 MODEL_HF_ID="FreedomIntelligence/openPangu-Embedded-1B-V1.1"
-IMDB_TRAIN_URL="${HF_MIRROR}/datasets/stanfordnlp/imdb/resolve/main/data/train-00000-of-00001.parquet"
-IMDB_TEST_URL="${HF_MIRROR}/datasets/stanfordnlp/imdb/resolve/main/data/test-00000-of-00001.parquet"
 
 # ===== 训练参数 =====
 LR="${LR:-2e-5}"
@@ -111,16 +109,21 @@ except ImportError:
     TEST_PQ="${DOWNLOADS_DIR}/test-00000-of-00001.parquet"
 
     if [ -f "${TRAIN_PQ}" ] && [ -f "${TEST_PQ}" ]; then
-        log_warn "IMDB 数据集已存在，跳过下载"
-    else
-        log_info "下载训练集..."
-        wget -q --show-progress -O "${TRAIN_PQ}" "${IMDB_TRAIN_URL}" || \
-            curl -L -o "${TRAIN_PQ}" "${IMDB_TRAIN_URL}"
-        log_info "下载测试集..."
-        wget -q --show-progress -O "${TEST_PQ}" "${IMDB_TEST_URL}" || \
-            curl -L -o "${TEST_PQ}" "${IMDB_TEST_URL}"
-        log_info "数据集下载完成: ${DOWNLOADS_DIR}"
+        # 还要检查文件大小（之前可能下载了无效的 15 字节文件）
+        TRAIN_SIZE=$(stat -c%s "${TRAIN_PQ}" 2>/dev/null || stat -f%z "${TRAIN_PQ}" 2>/dev/null || echo 0)
+        TEST_SIZE=$(stat -c%s "${TEST_PQ}" 2>/dev/null || stat -f%z "${TEST_PQ}" 2>/dev/null || echo 0)
+        if [ "${TRAIN_SIZE}" -gt 10000 ] && [ "${TEST_SIZE}" -gt 10000 ]; then
+            log_warn "IMDB 数据集已存在，跳过下载"
+            return
+        else
+            log_warn "已有文件无效（train=${TRAIN_SIZE}B, test=${TEST_SIZE}B），重新下载"
+        fi
     fi
+
+    log_info "下载 IMDB 数据集（使用 Python huggingface_hub API）..."
+    python "${SCRIPTS_DIR}/download_data.py" --save-dir "${DOWNLOADS_DIR}" --split train
+    python "${SCRIPTS_DIR}/download_data.py" --save-dir "${DOWNLOADS_DIR}" --split test
+    log_info "数据集下载完成: ${DOWNLOADS_DIR}"
 
     log_info "Step 0 完成: 环境就绪"
 }

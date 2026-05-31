@@ -31,7 +31,6 @@ RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
 LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
 
 MS_LLM_DIR=""  # env_setup 会设置
-export PYTHONPATH=""        # env_setup 会追加 MindSpeed/MindSpeed-LLM
 
 # HuggingFace 镜像
 HF_MIRROR="https://hf-mirror.com"
@@ -63,60 +62,69 @@ env_setup() {
     log_info "Step 0: 环境搭建"
     log_info "============================================="
 
-    # ---- 0a. 获取 Megatron-LM / MindSpeed-LLM ----
-    #    MindSpeed 使用系统 pip 安装版，不克隆（版本兼容性）
-    log_info "--- 0a. 获取 Megatron-LM / MindSpeed-LLM ---"
+    # ---- 0a. 安装 Megatron-LM / MindSpeed / MindSpeed-LLM ----
+    #    pip install -e 如果 C 扩展编译失败，退回用 .pth 文件注册路径
+    log_info "--- 0a. 安装依赖 ---"
 
-    # 清理残留
-    rm -rf "${WORK_DIR}/MindSpeed" "${WORK_DIR}/MindSpeed-LLM" "${WORK_DIR}/Megatron-LM"
+    SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
-    # ============================================================
-    # 1) Megatron-LM（如果系统没有，克隆并加入 PYTHONPATH）
-    # ============================================================
+    # 辅助函数：pip install -e 失败时用 .pth 文件注册路径
+    _safe_install() {
+        local name="$1" repo_url="$2" dest_dir="$3" branch="$4"
+        rm -rf "${dest_dir}"
+
+        if [ -n "${branch}" ]; then
+            git clone --depth 1 --branch "${branch}" "${repo_url}" "${dest_dir}" 2>&1 | tail -1
+        else
+            git clone --depth 1 "${repo_url}" "${dest_dir}" 2>&1 | tail -1
+        fi
+
+        log_info "  pip install -e ${name}..."
+        pip install -e "${dest_dir}" --quiet > /tmp/pip_install.log 2>&1 && {
+            log_info "  ${name} OK"
+            return
+        }
+
+        # 编译失败，用 .pth 注册（不依赖环境变量）
+        log_warn "  pip 失败，用 .pth 注册路径: ${dest_dir}"
+        echo "${dest_dir}" > "${SITE_PACKAGES}/${name}.pth"
+    }
+
+    # ---- 1) Megatron-LM ----
     if python3 -c "import megatron.core" 2>/dev/null; then
-        log_info "megatron.core 系统已安装"
+        log_info "megatron.core 已就绪"
     else
         log_info "克隆 Megatron-LM..."
-        git clone --depth 1 --branch core_v0.12.0 \
+        rm -rf "${WORK_DIR}/Megatron-LM"
+        git clone --depth 1 \
             https://github.com/NVIDIA/Megatron-LM.git "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1 || {
             git clone --depth 1 \
                 https://gitee.com/ascend/Megatron-LM.git "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1
         }
-        export PYTHONPATH="${WORK_DIR}/Megatron-LM:${PYTHONPATH:-}"
-    fi
-
-    # ============================================================
-    # 2) MindSpeed — clone gitee 源码（PyPI 不通），pin 兼容版本
-    # ============================================================
-    if ! python3 -c "import mindspeed" 2>/dev/null; then
-        log_info "克隆 MindSpeed..."
-        pip uninstall mindspeed -y 2>/dev/null || true
-        # 优先尝试 1.0.0 tag（与 MindSpeed-LLM 1.0.0 匹配）
-        git clone --depth 1 --branch 1.0.0 \
-            https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed" 2>&1 | tail -1 || {
-            # 不行就退而求其次
-            git clone --depth 1 \
-                https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed" 2>&1 | tail -1
+        pip install -e "${WORK_DIR}/Megatron-LM" --quiet > /tmp/pip_meg.log 2>&1 || {
+            log_warn "Megatron-LM pip install 失败，用 .pth"
+            echo "${WORK_DIR}/Megatron-LM" > "${SITE_PACKAGES}/megatron.pth"
         }
-        export PYTHONPATH="${WORK_DIR}/MindSpeed:${PYTHONPATH:-}"
     fi
 
+    # ---- 2) MindSpeed ----
     if python3 -c "import mindspeed" 2>/dev/null; then
-        log_info "mindspeed OK"
+        log_info "mindspeed 已就绪"
     else
-        log_error "mindspeed 加载失败"
-        exit 1
+        pip uninstall mindspeed -y 2>/dev/null || true
+        _safe_install "mindspeed" \
+            "https://gitee.com/ascend/MindSpeed.git" \
+            "${WORK_DIR}/MindSpeed" ""
     fi
 
-    # ============================================================
-    # 3) MindSpeed-LLM 1.0.0（必须用这个版本，与实验要求一致）
-    # ============================================================
-    log_info "克隆 MindSpeed-LLM 1.0.0..."
-    git clone --depth 1 --branch 1.0.0 \
-        https://gitee.com/ascend/MindSpeed-LLM.git "${WORK_DIR}/MindSpeed-LLM" 2>&1 | tail -1
+    # ---- 3) MindSpeed-LLM 1.0.0 ----
+    pip uninstall mindspeed-llm -y 2>/dev/null || true
+    _safe_install "mindspeed_llm" \
+        "https://gitee.com/ascend/MindSpeed-LLM.git" \
+        "${WORK_DIR}/MindSpeed-LLM" "1.0.0"
     MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"
-    export PYTHONPATH="${MS_LLM_DIR}:${PYTHONPATH:-}"
-    log_info "PYTHONPATH: $(echo ${PYTHONPATH} | tr ':' '\n' | head -3)"
+
+    log_info "依赖安装完成"
 
     # ---- 0b. 下载 openPangu-1B 模型 ----
     log_info "--- 0b. 下载模型: ${MODEL_HF_ID} ---"

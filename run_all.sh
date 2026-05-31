@@ -66,7 +66,16 @@ env_setup() {
     #    pip install -e 如果 C 扩展编译失败，退回用 .pth 文件注册路径
     log_info "--- 0a. 安装依赖 ---"
 
-    SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+    SITE_PACKAGES=$(python3 -c "
+import site, os
+# 优先用 user site-packages（有写权限）
+user_sp = site.getusersitepackages()
+if user_sp and os.access(os.path.dirname(user_sp) if not os.path.exists(user_sp) else user_sp, os.W_OK):
+    print(user_sp)
+else:
+    print(site.getsitepackages()[0])
+")
+mkdir -p "${SITE_PACKAGES}"
 
     # 辅助函数：pip install -e 失败时用 .pth 文件注册路径
     _safe_install() {

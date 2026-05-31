@@ -86,18 +86,25 @@ env_setup() {
     fi
 
     # ============================================================
-    # 2) MindSpeed — 只卸载 + 重装来修复残留的损坏 editable install
+    # 2) MindSpeed — clone gitee 源码（PyPI 不通），pin 兼容版本
     # ============================================================
     if ! python3 -c "import mindspeed" 2>/dev/null; then
-        log_info "修复 mindspeed（清理残留 + 重新安装）..."
+        log_info "克隆 MindSpeed..."
         pip uninstall mindspeed -y 2>/dev/null || true
-        pip install mindspeed --quiet 2>&1 | tail -1
+        # 优先尝试 1.0.0 tag（与 MindSpeed-LLM 1.0.0 匹配）
+        git clone --depth 1 --branch 1.0.0 \
+            https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed" 2>&1 | tail -1 || {
+            # 不行就退而求其次
+            git clone --depth 1 \
+                https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed" 2>&1 | tail -1
+        }
+        export PYTHONPATH="${WORK_DIR}/MindSpeed:${PYTHONPATH:-}"
     fi
 
     if python3 -c "import mindspeed" 2>/dev/null; then
         log_info "mindspeed OK"
     else
-        log_error "mindspeed 安装失败"
+        log_error "mindspeed 加载失败"
         exit 1
     fi
 

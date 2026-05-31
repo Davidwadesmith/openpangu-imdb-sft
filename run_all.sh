@@ -86,14 +86,20 @@ env_setup() {
     fi
 
     # ============================================================
-    # 2) MindSpeed — 只用系统 pip 安装版，不克隆源码
-    #    （克隆版的 gitee master 分支与 MindSpeed-LLM 1.0.0 不兼容）
+    # 2) MindSpeed — 只卸载 + 重装来修复残留的损坏 editable install
     # ============================================================
     if ! python3 -c "import mindspeed" 2>/dev/null; then
-        log_info "安装 MindSpeed..."
+        log_info "修复 mindspeed（清理残留 + 重新安装）..."
+        pip uninstall mindspeed -y 2>/dev/null || true
         pip install mindspeed --quiet 2>&1 | tail -1
     fi
-    log_info "MindSpeed: $(python3 -c 'import mindspeed; print(mindspeed.__version__)' 2>/dev/null || echo 'OK')"
+
+    if python3 -c "import mindspeed" 2>/dev/null; then
+        log_info "mindspeed OK"
+    else
+        log_error "mindspeed 安装失败"
+        exit 1
+    fi
 
     # ============================================================
     # 3) MindSpeed-LLM 1.0.0（必须用这个版本，与实验要求一致）

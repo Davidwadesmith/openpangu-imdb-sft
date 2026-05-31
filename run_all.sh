@@ -73,14 +73,14 @@ env_setup() {
     log_info "克隆 Megatron-LM..."
     git clone --depth 1 --branch core_v0.12.0 \
         https://github.com/NVIDIA/Megatron-LM.git "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1 || {
-        log_info "github 不通，尝试 gitee 镜像..."
-        git clone --depth 1 --branch core_v0.12.0 \
+        log_info "github 不通或分支不存在，尝试 gitee master..."
+        git clone --depth 1 \
             https://gitee.com/ascend/Megatron-LM.git "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1
     }
 
-    # 2) MindSpeed
+    # 2) MindSpeed（用主分支，不 pin 特定 tag）
     log_info "克隆 MindSpeed..."
-    git clone --depth 1 --branch v0.12.1 \
+    git clone --depth 1 \
         https://gitee.com/ascend/MindSpeed.git "${WORK_DIR}/MindSpeed" 2>&1 | tail -1
 
     # 3) MindSpeed-LLM
@@ -94,11 +94,11 @@ env_setup() {
     log_info "PYTHONPATH 已设置（Megatron-LM + MindSpeed + MindSpeed-LLM）"
 
     # 验证 import
-    if ! python3 -c "import megatron.core; print('megatron OK')" 2>/dev/null; then
-        log_error "megatron.core 导入失败，请检查 Megatron-LM 克隆是否成功"
-        exit 1
+    if python3 -c "import megatron.core; print('  megatron.core OK')" 2>/dev/null; then
+        log_info "megatron.core 就绪"
+    else
+        log_warn "megatron.core 导入失败，将在 Step 2 实际运行时再检查"
     fi
-    log_info "megatron.core 就绪"
 
     # ---- 0b. 下载 openPangu-1B 模型 ----
     log_info "--- 0b. 下载模型: ${MODEL_HF_ID} ---"

@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # ============================================================
-#  openPangu-1B IMDB 情感分类微调 — 一键运行脚本（完全自包含）
-#  自动下载：MindSpeed/MindSpeed-LLM、模型权重、IMDB 数据集
-#  使用方法：bash run_all.sh
+#  openPangu-1B IMDB 情感分类 SFT — 一键运行脚本
+#  用法: bash run_all.sh
+#  首次运行会自动搭建虚拟环境、下载所有依赖
+#  后续运行会跳过已完成步骤
 # ============================================================
 
-# ===== 颜色输出 =====
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,332 +16,167 @@ log_info()  { echo -e "${GREEN}[INFO]${NC}  $(date '+%H:%M:%S') $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
 
-# ===== 路径配置（全部在项目目录内）=====
-WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCRIPTS_DIR="${WORK_DIR}/scripts"
+WORKDIR="$(cd "$(dirname "$0")" && pwd)"
+export WORKDIR
+SCRIPTS_DIR="$WORKDIR/scripts"
+mkdir -p "$WORKDIR/cache" "$WORKDIR/ckpt" "$WORKDIR/sft_output" \
+         "$WORKDIR/logs" "$WORKDIR/results" "$WORKDIR/downloads" "$WORKDIR/data"
 
-MODEL_DIR="${WORK_DIR}/model"                  # HuggingFace 模型
-DOWNLOADS_DIR="${WORK_DIR}/downloads"          # IMDB parquet 文件
-DATA_DIR="${WORK_DIR}/data"                    # train_imdb.jsonl
-CACHE_DIR="${WORK_DIR}/cache"                  # 预处理 .bin/.idx
-CKPT_MCORE_DIR="${WORK_DIR}/ckpt/mcore"        # mcore 格式权重
-SFT_OUTPUT_DIR="${WORK_DIR}/sft_output"         # 训练 checkpoint
-CKPT_MG2HF_DIR="${WORK_DIR}/ckpt/mg2hf"         # HF 格式微调模型
-RESULTS_DIR="${WORK_DIR}/results"               # 推理结果
-LOGS_DIR="${WORK_DIR}/logs"                     # 训练日志
-
-MS_LLM_DIR=""  # env_setup 会设置
-
-# HuggingFace 镜像
-HF_MIRROR="https://hf-mirror.com"
-export HF_ENDPOINT="${HF_MIRROR}"
-
-# 模型标识
-MODEL_HF_ID="FreedomIntelligence/openPangu-Embedded-1B-V1.1"
-
-# ===== 训练参数 =====
-LR="${LR:-2e-5}"
-GBS="${GBS:-16}"
-MBS="${MBS:-1}"
-SEQ_LENGTH="${SEQ_LENGTH:-8192}"
-TRAIN_ITERS="${TRAIN_ITERS:-1563}"
-
-# ===== 目录初始化 =====
-mkdir -p "${DOWNLOADS_DIR}" "${DATA_DIR}" "${CACHE_DIR}" \
-         "${CKPT_MCORE_DIR}" "${SFT_OUTPUT_DIR}" "${CKPT_MG2HF_DIR}" \
-         "${RESULTS_DIR}" "${LOGS_DIR}"
-
-log_info "工作目录: ${WORK_DIR}"
-log_info "HF 镜像:   ${HF_MIRROR}"
+# ===== 环境加载 =====
+if [ -f "$WORKDIR/env.sh" ]; then
+    source "$WORKDIR/env.sh"
+fi
 
 # ============================================================
-#  Step 0: 环境搭建（下载框架、模型、数据集）
+#  Step 0: 环境搭建（首次运行）
 # ============================================================
-env_setup() {
+step0_setup() {
     log_info "============================================="
     log_info "Step 0: 环境搭建"
     log_info "============================================="
 
-    # ---- 0a. 安装 Megatron-LM / MindSpeed / MindSpeed-LLM ----
-    #    全部用 .pth 注册路径（pip install -e 会让 mindspeed 的 dummy_module
-    #    覆盖 transformer_engine，导致版本冲突）
-    log_info "--- 0a. 安装依赖 ---"
-
-    SITE_SP=$(python3 -c "
-import site, os
-usp = site.getusersitepackages()
-if usp:
-    os.makedirs(usp, exist_ok=True)
-    print(usp)
-else:
-    print(os.path.join(site.getsitepackages()[0]))
-")
-    mkdir -p "${SITE_SP}"
-
-    # ---- Megatron-LM ----
-    if python3 -c "import megatron.core" 2>/dev/null; then
-        log_info "megatron.core 已就绪"
+    # --- 0a. 虚拟环境 ---
+    if [ ! -f "$WORKDIR/.venv/bin/activate" ]; then
+        log_info "创建虚拟环境..."
+        python3.10 -m venv --system-site-packages "$WORKDIR/.venv"
+        source "$WORKDIR/.venv/bin/activate"
+        pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple -q
+        pip install ninja pybind11 transformers==4.53.2 datasets pandas \
+            pyarrow matplotlib tqdm sentencepiece safetensors \
+            -i https://pypi.tuna.tsinghua.edu.cn/simple -q
     else
-        log_info "克隆 Megatron-LM（core_v0.12.0）..."
-        rm -rf "${WORK_DIR}/Megatron-LM"
-        git clone --depth 1 --branch core_v0.12.0 \
-            https://github.com/NVIDIA/Megatron-LM.git \
-            "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1 || {
-            log_info "github 不通，用 gitee master..."
-            git clone --depth 1 \
-                https://gitee.com/ascend/Megatron-LM.git \
-                "${WORK_DIR}/Megatron-LM" 2>&1 | tail -1
-        }
-    fi
-    echo "${WORK_DIR}/Megatron-LM" > "${SITE_SP}/megatron.pth"
-
-    # ---- MindSpeed ----
-    if ! python3 -c "import mindspeed" 2>/dev/null; then
-        pip uninstall mindspeed -y 2>/dev/null || true
-        rm -rf "${WORK_DIR}/MindSpeed"
-        log_info "克隆 MindSpeed（1.0.0 tag，与 MindSpeed-LLM 1.0.0 匹配）..."
-        git clone --depth 1 --branch 1.0.0 \
-            https://gitee.com/ascend/MindSpeed.git \
-            "${WORK_DIR}/MindSpeed" 2>&1 | tail -1 || {
-            log_info "1.0.0 tag 不存在，用 master..."
-            git clone --depth 1 \
-                https://gitee.com/ascend/MindSpeed.git \
-                "${WORK_DIR}/MindSpeed" 2>&1 | tail -1
-        }
-        echo "${WORK_DIR}/MindSpeed" > "${SITE_SP}/mindspeed.pth"
+        source "$WORKDIR/.venv/bin/activate"
     fi
 
-    # ---- MindSpeed-LLM 1.0.0 ----
-    pip uninstall mindspeed-llm -y 2>/dev/null || true
-    rm -rf "${WORK_DIR}/MindSpeed-LLM"
-    log_info "克隆 MindSpeed-LLM 1.0.0..."
-    git clone --depth 1 --branch 1.0.0 \
-        https://gitee.com/ascend/MindSpeed-LLM.git \
-        "${WORK_DIR}/MindSpeed-LLM" 2>&1 | tail -1
-    MS_LLM_DIR="${WORK_DIR}/MindSpeed-LLM"
-    echo "${MS_LLM_DIR}" > "${SITE_SP}/mindspeed_llm.pth"
-
-    log_info ".pth 文件已写入 ${SITE_SP}"
-    log_info "依赖安装完成（全部 .pth，无 pip install 冲突）"
-
-    # ---- 0b. 下载 openPangu-1B 模型 ----
-    log_info "--- 0b. 下载模型: ${MODEL_HF_ID} ---"
-    if [ -f "${MODEL_DIR}/config.json" ] && [ -f "${MODEL_DIR}/model.safetensors" ]; then
-        log_warn "模型已存在，跳过下载"
-    else
-        log_info "从 ${HF_MIRROR} 下载（约 2GB）..."
-        python "${SCRIPTS_DIR}/download_model.py" \
-            --model-id "${MODEL_HF_ID}" \
-            --save-dir "${MODEL_DIR}"
-        log_info "模型下载完成: ${MODEL_DIR}"
+    # --- 0b. MindSpeed-LLM 1.0.0 ---
+    if [ ! -f "$WORKDIR/MindSpeed-LLM/convert_ckpt.py" ]; then
+        log_info "克隆 MindSpeed-LLM 1.0.0..."
+        git clone https://gitee.com/ascend/MindSpeed-LLM.git "$WORKDIR/MindSpeed-LLM"
+        cd "$WORKDIR/MindSpeed-LLM"
+        git checkout 1.0.0
+        cd "$WORKDIR"
     fi
 
-    # ---- 0c. 下载 IMDB 数据集 ----
-    log_info "--- 0c. 下载 IMDB 数据集 ---"
-    TRAIN_PQ="${DOWNLOADS_DIR}/train-00000-of-00001.parquet"
-    TEST_PQ="${DOWNLOADS_DIR}/test-00000-of-00001.parquet"
-
-    if [ -f "${TRAIN_PQ}" ] && [ -f "${TEST_PQ}" ]; then
-        # 还要检查文件大小（之前可能下载了无效的 15 字节文件）
-        TRAIN_SIZE=$(stat -c%s "${TRAIN_PQ}" 2>/dev/null || stat -f%z "${TRAIN_PQ}" 2>/dev/null || echo 0)
-        TEST_SIZE=$(stat -c%s "${TEST_PQ}" 2>/dev/null || stat -f%z "${TEST_PQ}" 2>/dev/null || echo 0)
-        if [ "${TRAIN_SIZE}" -gt 10000 ] && [ "${TEST_SIZE}" -gt 10000 ]; then
-            log_warn "IMDB 数据集已存在，跳过下载"
-            return
-        else
-            log_warn "已有文件无效（train=${TRAIN_SIZE}B, test=${TEST_SIZE}B），重新下载"
-        fi
+    # --- 0c. Megatron-LM core_r0.6.0 + 嵌入 ---
+    MEG_DIR="$WORKDIR/MindSpeed-LLM/megatron"
+    if [ ! -d "$MEG_DIR/core" ]; then
+        log_info "克隆 Megatron-LM core_r0.6.0..."
+        git clone https://gitee.com/mirrors/Megatron-LM.git "$WORKDIR/Megatron-LM"
+        cd "$WORKDIR/Megatron-LM"
+        git checkout core_r0.6.0
+        cd "$WORKDIR"
+        rm -rf "$WORKDIR/MindSpeed-LLM/megatron"
+        cp -r "$WORKDIR/Megatron-LM/megatron" "$WORKDIR/MindSpeed-LLM/"
+        log_info "Megatron 已嵌入 MindSpeed-LLM"
     fi
 
-    log_info "下载 IMDB 数据集（使用 Python huggingface_hub API）..."
-    python "${SCRIPTS_DIR}/download_data.py" --save-dir "${DOWNLOADS_DIR}" --split train
-    python "${SCRIPTS_DIR}/download_data.py" --save-dir "${DOWNLOADS_DIR}" --split test
-    log_info "数据集下载完成: ${DOWNLOADS_DIR}"
+    # --- 0d. MindSpeed 稳定 commit ---
+    if [ ! -f "$WORKDIR/MindSpeed/setup.py" ]; then
+        log_info "克隆 MindSpeed..."
+        git clone https://gitee.com/ascend/MindSpeed.git "$WORKDIR/MindSpeed"
+        cd "$WORKDIR/MindSpeed"
+        git checkout 969686ff
+        cd "$WORKDIR"
+    fi
 
-    log_info "Step 0 完成: 环境就绪"
+    # --- 0e. openPangu 模型 ---
+    MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
+    if [ ! -f "$MODEL_DIR/model.safetensors" ]; then
+        log_info "下载 openPangu-1B 模型..."
+        git clone https://gitcode.com/ascend-tribe/openPangu-Embedded-1B-V1.1.git "$MODEL_DIR"
+    fi
+    MODEL_SIZE=$(stat -c%s "$MODEL_DIR/model.safetensors" 2>/dev/null || echo 0)
+    log_info "模型权重: $MODEL_DIR/model.safetensors ($(( MODEL_SIZE / 1024 / 1024 / 1024 ))GB)"
+
+    # --- 0f. 编译 Megatron helpers ---
+    HELPERS_SO="$WORKDIR/MindSpeed-LLM/megatron/core/datasets/helpers.cpython-310-aarch64-linux-gnu.so"
+    if [ ! -f "$HELPERS_SO" ]; then
+        log_info "编译 Megatron helpers..."
+        pip install ninja pybind11 -i https://pypi.tuna.tsinghua.edu.cn/simple -q
+        cd "$WORKDIR/MindSpeed-LLM"
+        cat > build_megatron_helpers.py <<'PYEOF'
+from setuptools import setup
+from torch.utils.cpp_extension import CppExtension, BuildExtension
+import os, sys
+# 确保 megatron 在 sys.path
+sys.path.insert(0, ".")
+setup(
+    name="megatron_core_datasets_helpers",
+    ext_modules=[
+        CppExtension(
+            name="megatron.core.datasets.helpers",
+            sources=["megatron/core/datasets/helpers.cpp"],
+            extra_compile_args=["-O3", "-std=c++17"],
+        )
+    ],
+    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
+)
+PYEOF
+        python build_megatron_helpers.py build_ext --inplace
+        cd "$WORKDIR"
+    fi
+
+    source "$WORKDIR/env.sh"
+    log_info "Step 0 完成"
 }
 
 # ============================================================
-#  Step 1: 数据格式转换（Parquet → JSONL）
+#  Step 1: 数据下载与转换
 # ============================================================
 step1_prepare_data() {
-    log_info "Step 1/8: 数据格式转换 (Parquet → JSONL)..."
-
-    if [ -f "${DATA_DIR}/train_imdb.jsonl" ]; then
+    log_info "Step 1/8: 数据下载与格式转换..."
+    if [ -f "$WORKDIR/data/train_imdb.jsonl" ]; then
         log_warn "train_imdb.jsonl 已存在，跳过"
         return
     fi
-
-    python "${SCRIPTS_DIR}/prepare_data.py" \
-        --input "${DOWNLOADS_DIR}/train-00000-of-00001.parquet" \
-        --output "${DATA_DIR}/train_imdb.jsonl"
-
-    log_info "Step 1 完成: ${DATA_DIR}/train_imdb.jsonl"
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/prepare_data.py"
 }
 
 # ============================================================
-#  Step 2: 数据预处理（tokenize → .bin / .idx）
+#  Step 2: 数据预处理
 # ============================================================
 step2_preprocess() {
     log_info "Step 2/8: 数据预处理..."
-
-    if [ -f "${CACHE_DIR}/sft_text_document.bin" ] && \
-       [ -f "${CACHE_DIR}/sft_text_document.idx" ]; then
+    local cache="$WORKDIR/cache"
+    if ls "$cache"/*.bin "$cache"/*.idx 2>/dev/null | head -1 | grep -q .; then
         log_warn "缓存已存在，跳过"
         return
     fi
-
-    python "${SCRIPTS_DIR}/preprocess.py" \
-        --input "${DATA_DIR}/train_imdb.jsonl" \
-        --tokenizer-path "${MODEL_DIR}" \
-        --output-prefix "${CACHE_DIR}/sft" \
-        --seq-length "${SEQ_LENGTH}"
-
-    log_info "Step 2 完成"
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/preprocess.sh"
 }
 
 # ============================================================
-#  Step 3: 模型权重转换 HF → mcore
+#  Step 3: HF → mcore 转换
 # ============================================================
 step3_convert_hf2mcore() {
-    log_info "Step 3/8: HF → mcore..."
-
-    if [ -f "${CKPT_MCORE_DIR}/latest_checkpointed_iteration.txt" ]; then
+    log_info "Step 3/8: HF → mcore 权重转换..."
+    if [ -f "$WORKDIR/ckpt/mcore/latest_checkpointed_iteration.txt" ]; then
         log_warn "mcore 权重已存在，跳过"
         return
     fi
-
-    python "${MS_LLM_DIR}/convert_ckpt.py" \
-        --model-type GPT \
-        --load-model-type hf \
-        --save-model-type mg \
-        --load-dir "${MODEL_DIR}" \
-        --save-dir "${CKPT_MCORE_DIR}" \
-        --tokenizer-model "${MODEL_DIR}" \
-        --add-qkv-bias \
-        --add-dense-bias \
-        --target-tensor-parallel-size 1 \
-        --target-pipeline-parallel-size 1 \
-        --params-dtype bf16 \
-        --use-mcore-models
-
-    log_info "Step 3 完成"
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/convert_hf2mcore.sh"
 }
 
 # ============================================================
 #  Step 4: SFT 训练
 # ============================================================
 step4_train() {
-    log_info "Step 4/8: SFT 训练"
-    log_info "  LR=${LR} GBS=${GBS} MBS=${MBS} Iters=${TRAIN_ITERS}"
-
-    TRAIN_LOG="${LOGS_DIR}/train.log"
-
-    torchrun --nproc_per_node=1 \
-        "${MS_LLM_DIR}/posttrain_gpt.py" \
-        --stage sft \
-        --finetune \
-        --is-instruction-dataset \
-        --use-mcore-models \
-        --tensor-model-parallel-size 1 \
-        --pipeline-model-parallel-size 1 \
-        --sequence-parallel \
-        --num-layers 26 \
-        --hidden-size 1536 \
-        --ffn-hidden-size 6144 \
-        --num-attention-heads 12 \
-        --group-query-attention \
-        --num-query-groups 6 \
-        --make-vocab-size-divisible-by 1 \
-        --padded-vocab-size 153376 \
-        --vocab-size 153376 \
-        --max-position-embeddings "${SEQ_LENGTH}" \
-        --seq-length "${SEQ_LENGTH}" \
-        --micro-batch-size "${MBS}" \
-        --global-batch-size "${GBS}" \
-        --lr "${LR}" \
-        --train-iters "${TRAIN_ITERS}" \
-        --lr-decay-style cosine \
-        --min-lr 1e-6 \
-        --lr-warmup-iters 100 \
-        --weight-decay 0.1 \
-        --clip-grad 1.0 \
-        --adam-beta1 0.9 \
-        --adam-beta2 0.999 \
-        --initial-loss-scale 4096 \
-        --init-method-std 0.02 \
-        --bf16 \
-        --seed 42 \
-        --data-path "${CACHE_DIR}/sft_text_document" \
-        --split 100,0,0 \
-        --tokenizer-type PretrainedFromHF \
-        --tokenizer-name-or-path "${MODEL_DIR}" \
-        --tokenizer-not-use-fast \
-        --save-interval 500 \
-        --save "${SFT_OUTPUT_DIR}" \
-        --load "${CKPT_MCORE_DIR}" \
-        --log-interval 1 \
-        --eval-interval 999999 \
-        --eval-iters 0 \
-        --no-load-optim \
-        --no-load-rng \
-        --no-gradient-accumulation-fusion \
-        --add-qkv-bias \
-        --add-dense-bias \
-        --no-bias-swiglu-fusion \
-        --normalization RMSNorm \
-        --norm-epsilon 1e-5 \
-        --swiglu \
-        --use-rotary-position-embeddings \
-        --rotary-percent 1.0 \
-        --rotary-base 4000000 \
-        --attention-dropout 0.0 \
-        --hidden-dropout 0.0 \
-        --no-masked-softmax-fusion \
-        --attention-softmax-in-fp32 \
-        --use-flash-attn \
-        --variable-seq-lengths \
-        --distributed-backend hccl \
-        2>&1 | tee "${TRAIN_LOG}"
-
-    log_info "Step 4 完成: ${TRAIN_LOG}"
+    log_info "Step 4/8: SFT 训练..."
+    log_info "  SEQ=4096 GBS=4 ITERS=300 LR=1e-5"
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/run_sft.sh"
 }
 
 # ============================================================
-#  Step 5: 权重转换 mcore → HF
+#  Step 5: mcore → HF 转换
 # ============================================================
 step5_convert_mcore2hf() {
-    log_info "Step 5/8: mcore → HF..."
-
-    LATEST_CKPT=$(ls -d "${SFT_OUTPUT_DIR}"/iter_* 2>/dev/null | sort -V | tail -1)
-    if [ -z "${LATEST_CKPT}" ]; then
-        log_error "未找到 SFT checkpoint"
-        exit 1
-    fi
-    log_info "  checkpoint: ${LATEST_CKPT}"
-
-    python "${MS_LLM_DIR}/convert_ckpt.py" \
-        --model-type GPT \
-        --load-model-type mg \
-        --save-model-type hf \
-        --load-dir "${LATEST_CKPT}" \
-        --save-dir "${CKPT_MG2HF_DIR}" \
-        --tokenizer-model "${MODEL_DIR}" \
-        --add-qkv-bias \
-        --add-dense-bias \
-        --target-tensor-parallel-size 1 \
-        --target-pipeline-parallel-size 1 \
-        --params-dtype bf16 \
-        --use-mcore-models
-
-    log_info "拷贝 tokenizer/model 文件..."
-    for f in tokenizer.model tokenizer_config.json tokenization_openpangu.py \
-             special_tokens_map.json generation_config.json \
-             configuration_openpangu_dense.py modeling_openpangu_dense.py; do
-        cp "${MODEL_DIR}/${f}" "${CKPT_MG2HF_DIR}/" 2>/dev/null || true
-    done
-
-    log_info "Step 5 完成"
+    log_info "Step 5/8: mcore → HF 转换..."
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/convert_mcore2hf.sh"
 }
 
 # ============================================================
@@ -349,25 +184,17 @@ step5_convert_mcore2hf() {
 # ============================================================
 step6_inference() {
     log_info "Step 6/8: 推理..."
-
-    python "${SCRIPTS_DIR}/inference.py" \
-        --model-path "${CKPT_MG2HF_DIR}" \
-        --test-parquet "${DOWNLOADS_DIR}/test-00000-of-00001.parquet" \
-        --output "${RESULTS_DIR}/test_imdb_results.jsonl"
-
-    log_info "Step 6 完成"
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/inference.py"
 }
 
 # ============================================================
 #  Step 7: 评测
 # ============================================================
 step7_evaluate() {
-    log_info "Step 7/8: 评测..."
-
-    python "${SCRIPTS_DIR}/evaluate.py" \
-        --input "${RESULTS_DIR}/test_imdb_results.jsonl"
-
-    log_info "Step 7 完成"
+    log_info "Step 7/8: 评测准确率..."
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/evaluate.py"
 }
 
 # ============================================================
@@ -375,12 +202,8 @@ step7_evaluate() {
 # ============================================================
 step8_plot_loss() {
     log_info "Step 8/8: 绘制 loss 曲线..."
-
-    python "${SCRIPTS_DIR}/plot_loss.py" \
-        --log-file "${LOGS_DIR}/train.log" \
-        --output "${WORK_DIR}/loss_curve.png"
-
-    log_info "Step 8 完成: ${WORK_DIR}/loss_curve.png"
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/plot_loss.py"
 }
 
 # ============================================================
@@ -389,14 +212,14 @@ step8_plot_loss() {
 main() {
     echo ""
     echo "============================================"
-    echo "  openPangu-1B IMDB 情感分类微调"
+    echo "  openPangu-1B IMDB SFT"
     echo "  $(date '+%Y-%m-%d %H:%M:%S')"
     echo "============================================"
     echo ""
 
     START_TIME=$(date +%s)
 
-    env_setup
+    step0_setup
     step1_prepare_data
     step2_preprocess
     step3_convert_hf2mcore
@@ -407,13 +230,8 @@ main() {
     step8_plot_loss
 
     END_TIME=$(date +%s)
-    DURATION=$((END_TIME - START_TIME))
-
-    echo ""
-    echo "============================================"
-    echo -e "  ${GREEN}全部完成!${NC}"
-    echo "  总耗时: $((DURATION / 60)) 分 $((DURATION % 60)) 秒"
-    echo "============================================"
+    log_info "总耗时: $(( (END_TIME - START_TIME) / 60 )) 分 $(( (END_TIME - START_TIME) % 60 )) 秒"
+    log_info "全部完成!"
 }
 
 main "$@"

@@ -1,58 +1,48 @@
 # -*- coding: utf-8 -*-
-"""
-绘制 SFT 训练 Loss 曲线
-从训练日志中提取 lm loss 值，生成 loss_curve.png
-"""
-import os
-import argparse
-
+"""从训练日志提取 lm loss 并绘制曲线"""
+import os, re
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
+work_dir = os.environ.get("WORKDIR", os.path.dirname(os.path.dirname(__file__)))
+loss_log = f"{work_dir}/logs/tune_mcore_pangu_1b_full_ptd.log"
+out_png = f"{work_dir}/loss_curve.png"
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--log-file", required=True, help="训练日志路径")
-    parser.add_argument("--output", required=True, help="输出图片路径")
-    args = parser.parse_args()
+loss_list = []
+iter_list = []
 
-    if not os.path.exists(args.log_file):
-        print(f"[ERROR] 日志文件不存在: {args.log_file}")
-        return
+pattern_iter = re.compile(r"iteration\s+(\d+)")
+pattern_loss = re.compile(r"\|\s*lm loss:\s*([0-9.eE+-]+)")
 
-    loss_list = []
-    with open(args.log_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if "| lm loss:" in line:
-                try:
-                    loss_value = float(line.split("| lm loss:")[-1].split("|")[0].strip())
-                    loss_list.append(loss_value)
-                except ValueError:
-                    continue
+if not os.path.exists(loss_log):
+    print(f"[WARN] 日志不存在: {loss_log}")
+    exit(0)
 
-    if not loss_list:
-        print("[WARN] 未从日志中提取到 loss 值")
-        return
+with open(loss_log, "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        m_loss = pattern_loss.search(line)
+        if not m_loss:
+            continue
+        loss = float(m_loss.group(1))
+        m_iter = pattern_iter.search(line)
+        step = int(m_iter.group(1)) if m_iter else len(loss_list) + 1
+        iter_list.append(step)
+        loss_list.append(loss)
 
-    steps = list(range(1, len(loss_list) + 1))
+if not loss_list:
+    raise RuntimeError("没有从日志中解析到 lm loss。")
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(steps, loss_list, "b-", linewidth=1.5, label="Training Loss")
-    plt.xlabel("Step")
-    plt.ylabel("Loss")
-    plt.title("SFT Training Loss Curve")
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.legend()
-
-    if len(steps) > 20:
-        plt.xticks(np.arange(min(steps), max(steps) + 1, max(1, len(steps) // 10)))
-
-    plt.tight_layout()
-    plt.savefig(args.output, dpi=150)
-    print(f"[plot_loss] 图片已保存: {args.output}")
-    print(f"[plot_loss] 共 {len(loss_list)} 个 loss 点，"
-          f"初始 loss={loss_list[0]:.4f}，最终 loss={loss_list[-1]:.4f}")
-
-
-if __name__ == "__main__":
-    main()
+plt.figure(figsize=(10, 6))
+plt.plot(iter_list, loss_list, linewidth=1.5, label="Training Loss")
+plt.xlabel("Iteration")
+plt.ylabel("LM Loss")
+plt.title("SFT Training Loss Curve")
+plt.grid(True, linestyle="--", alpha=0.7)
+plt.legend()
+plt.tight_layout()
+plt.savefig(out_png, dpi=200)
+print(f"[OK] loss 曲线已保存：{out_png}")
+print(f"[INFO] loss 点数：{len(loss_list)}")
+print(f"[INFO] first loss：{loss_list[0]}")
+print(f"[INFO] last loss：{loss_list[-1]}")

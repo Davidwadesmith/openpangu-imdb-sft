@@ -54,7 +54,7 @@ embed_megatron() {
 }
 
 patch_megatron_compatibility() {
-    local marker="$WORKDIR/.megatron_compatibility_patched"
+    local marker="$WORKDIR/.runtime_compatibility_v2_patched"
 
     if [ -f "$marker" ]; then
         log_warn "Megatron compatibility patches already applied"
@@ -68,7 +68,7 @@ from pathlib import Path
 
 
 def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> None:
-    path = Path(os.environ["WORKDIR"]) / "MindSpeed-LLM" / "megatron" / "core" / relative_path
+    path = Path(os.environ["WORKDIR"]) / "MindSpeed-LLM" / relative_path
     if not path.is_file():
         print(f"  skipped missing {relative_path}")
         return
@@ -84,7 +84,7 @@ def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> N
 
 
 patch_file(
-    "optimizer/__init__.py",
+    "megatron/core/optimizer/__init__.py",
     "from apex.optimizers import FusedSGD as SGD",
     """try:
     from apex.optimizers import FusedSGD as SGD
@@ -95,13 +95,13 @@ except (ImportError, AttributeError):
     "except (ImportError, AttributeError):",
 )
 patch_file(
-    "optimizer/distrib_optimizer.py",
+    "megatron/core/optimizer/distrib_optimizer.py",
     "HAVE_APEX_OR_TE = True",
     "HAVE_APEX_OR_TE = False",
     "HAVE_APEX_OR_TE = False",
 )
 patch_file(
-    "tensor_parallel/random.py",
+    "megatron/core/tensor_parallel/random.py",
     "from transformer_engine.pytorch.distributed import activation_recompute_forward",
     """try:
     from transformer_engine.pytorch.distributed import activation_recompute_forward
@@ -111,7 +111,7 @@ except ImportError:
     "def activation_recompute_forward(*args, **kwargs):",
 )
 patch_file(
-    "extensions/transformer_engine.py",
+    "megatron/core/extensions/transformer_engine.py",
     "from transformer_engine.pytorch.distributed import activation_recompute_forward",
     """try:
     from transformer_engine.pytorch.distributed import activation_recompute_forward
@@ -119,6 +119,17 @@ except ImportError:
     def activation_recompute_forward(*args, **kwargs):
         raise NotImplementedError""",
     "def activation_recompute_forward(*args, **kwargs):",
+)
+patch_file(
+    "mindspeed_llm/core/optimizer/__init__.py",
+    "from apex.optimizers import FusedSGD as SGD",
+    """try:
+    from apex.optimizers import FusedSGD as SGD
+except (ImportError, AttributeError):
+    class SGD:
+        def __init__(self, *args, **kwargs):
+            pass""",
+    "except (ImportError, AttributeError):",
 )
 PY
     touch "$marker"

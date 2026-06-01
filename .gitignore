@@ -31,3 +31,6 @@ tmp/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 本地隔离开发目录
+.worktrees/

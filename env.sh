@@ -11,16 +11,15 @@ if [ -f "$WORKDIR/.venv/bin/activate" ]; then
     source "$WORKDIR/.venv/bin/activate"
 fi
 
-# CANN 环境（set -e 下可能被误杀，临时关闭）
-__OLD_ERREXIT_STATE=$(set +o | grep errexit)
+# CANN 环境（set -e 下可能被误杀，临时关闭，然后强制恢复）
 set +e
 if [ -f /usr/local/Ascend/cann-8.5.2/set_env.sh ]; then
     source /usr/local/Ascend/cann-8.5.2/set_env.sh
 else
     echo "[WARN] 未找到 CANN set_env.sh"
 fi
-eval "$__OLD_ERREXIT_STATE"
-unset __OLD_ERREXIT_STATE
+set -e
+set -o pipefail 2>/dev/null || true
 
 export PATH="$WORKDIR/.venv/bin:$PATH"
 

@@ -56,10 +56,13 @@ fi
 
 # 真正用于推理的模型在 mg2hf/mg2hf 子目录
 INFERENCE_DIR="$HF_OUT/mg2hf"
-echo "[INFO] 补齐推理目录 tokenizer: $INFERENCE_DIR"
-cp -f "$HF_OUT"/tokenizer.model "$INFERENCE_DIR/" 2>/dev/null || true
-cp -f "$HF_OUT"/tokenizer_config.json "$INFERENCE_DIR/" 2>/dev/null || true
-cp -f "$HF_OUT"/special_tokens_map.json "$INFERENCE_DIR/" 2>/dev/null || true
-cp -f "$HF_OUT"/tokenization_openpangu.py "$INFERENCE_DIR/" 2>/dev/null || true
+mkdir -p "$INFERENCE_DIR"
+echo "[INFO] 补齐推理目录: $INFERENCE_DIR"
+# 只复制 config/tokenizer 文件，不复制 model.safetensors（避免覆盖转换后的）
+for f in "$HF_OUT"/*.json "$HF_OUT"/*.model "$HF_OUT"/*.py "$HF_OUT"/*.tiktoken; do
+    [ -f "$f" ] && cp -f "$f" "$INFERENCE_DIR/"
+done
+echo "[INFO] 推理目录:"
+ls -lh "$INFERENCE_DIR/"
 
 echo "[OK] mcore -> HF 转换完成。推理模型: $INFERENCE_DIR"

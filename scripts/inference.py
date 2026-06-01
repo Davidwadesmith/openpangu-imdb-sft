@@ -2,6 +2,9 @@
 """IMDB 测试集推理"""
 import os, json, pandas as pd, torch
 
+# 防止 huggingface_hub 对本地路径做 repo_id 校验
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 try:
     import torch_npu  # noqa
 except Exception:
@@ -23,10 +26,11 @@ print(f"[INFO] 模型路径: {model_path}")
 print(f"[INFO] 测试集: {test_path}")
 
 tokenizer = AutoTokenizer.from_pretrained(
-    model_path, use_fast=False, trust_remote_code=True
+    model_path, use_fast=False, trust_remote_code=True, local_files_only=True
 )
 model = AutoModelForCausalLM.from_pretrained(
-    model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
+    model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
+    low_cpu_mem_usage=True, local_files_only=True
 )
 model = model.to("npu")
 model.eval()

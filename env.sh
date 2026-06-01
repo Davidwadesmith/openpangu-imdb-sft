@@ -8,15 +8,22 @@ if [ -f "$WORKDIR/.venv/bin/activate" ]; then
 fi
 
 # CANN set_env.sh may fail under errexit even when the environment is usable.
-__OLD_ERREXIT_STATE="$(set +o | grep errexit)"
+case "$-" in
+    *e*) __ERREXIT_WAS_SET=1 ;;
+    *) __ERREXIT_WAS_SET=0 ;;
+esac
 set +e
 if [ -f /usr/local/Ascend/cann-8.5.2/set_env.sh ]; then
     source /usr/local/Ascend/cann-8.5.2/set_env.sh
 else
     echo "[WARN] CANN set_env.sh not found"
 fi
-eval "$__OLD_ERREXIT_STATE"
-unset __OLD_ERREXIT_STATE
+if [ "$__ERREXIT_WAS_SET" -eq 1 ]; then
+    set -e
+else
+    set +e
+fi
+unset __ERREXIT_WAS_SET
 set -o pipefail 2>/dev/null || true
 
 export PATH="$WORKDIR/.venv/bin:$PATH"

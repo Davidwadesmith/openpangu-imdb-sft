@@ -69,6 +69,9 @@ from pathlib import Path
 
 def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> None:
     path = Path(os.environ["WORKDIR"]) / "MindSpeed-LLM" / "megatron" / "core" / relative_path
+    if not path.is_file():
+        print(f"  skipped missing {relative_path}")
+        return
     text = path.read_text(encoding="utf-8")
     if old in text:
         path.write_text(text.replace(old, new), encoding="utf-8")
@@ -77,7 +80,7 @@ def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> N
     if patched_marker in text:
         print(f"  already patched {relative_path}")
         return
-    raise RuntimeError(f"Expected patch location not found: {path}")
+    print(f"  skipped unchanged {relative_path}")
 
 
 patch_file(

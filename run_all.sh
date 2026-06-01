@@ -54,12 +54,27 @@ embed_megatron() {
 }
 
 patch_megatron_compatibility() {
-    local marker="$WORKDIR/.runtime_compatibility_v2_patched"
+    local marker="$WORKDIR/.runtime_compatibility_v3_patched"
+    local megatron_source="$WORKDIR/Megatron-LM/megatron/core"
+    local embedded_core="$WORKDIR/MindSpeed-LLM/megatron/core"
+    local relative_path
 
     if [ -f "$marker" ]; then
         log_warn "Megatron compatibility patches already applied"
         return
     fi
+
+    log_info "Restoring compatibility patch targets from clean checkouts"
+    for relative_path in \
+        optimizer/__init__.py \
+        optimizer/distrib_optimizer.py \
+        tensor_parallel/random.py \
+        extensions/transformer_engine.py; do
+        if [ -f "$megatron_source/$relative_path" ]; then
+            cp -f "$megatron_source/$relative_path" "$embedded_core/$relative_path"
+        fi
+    done
+    git -C "$WORKDIR/MindSpeed-LLM" checkout -- mindspeed_llm/core/optimizer/__init__.py
 
     log_info "Applying Megatron apex/transformer_engine compatibility patches"
     python - <<'PY'
@@ -73,12 +88,14 @@ def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> N
         print(f"  skipped missing {relative_path}")
         return
     text = path.read_text(encoding="utf-8")
-    if old in text:
-        path.write_text(text.replace(old, new), encoding="utf-8")
-        print(f"  patched {relative_path}")
-        return
     if patched_marker in text:
         print(f"  already patched {relative_path}")
+        return
+    if old in text:
+        patched = text.replace(old, new)
+        compile(patched, str(path), "exec")
+        path.write_text(patched, encoding="utf-8")
+        print(f"  patched {relative_path}")
         return
     print(f"  skipped unchanged {relative_path}")
 

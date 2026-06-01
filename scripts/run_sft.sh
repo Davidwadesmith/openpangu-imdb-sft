@@ -110,5 +110,15 @@ torchrun --nproc_per_node 1 pretrain_gpt.py \
     --recompute-num-layers 26 \
     2>&1 | tee -a "$LOG_FILE"
 
+if [ ! -f "$CKPT_SAVE_DIR/latest_checkpointed_iteration.txt" ]; then
+    echo "[ERROR] SFT finished without a saved checkpoint: $CKPT_SAVE_DIR" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
+if ! grep -q "| lm loss:" "$LOG_FILE"; then
+    echo "[ERROR] SFT finished without training loss entries: $LOG_FILE" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
 echo "[INFO] END_TIME=$(date '+%F %T')" | tee -a "$LOG_FILE"
 echo "[OK] SFT completed: $LOG_FILE"

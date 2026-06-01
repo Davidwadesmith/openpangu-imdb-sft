@@ -35,6 +35,9 @@ export TRANSFORMERS_CACHE="$HF_HOME/transformers"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export TORCH_EXTENSIONS_DIR="$WORKDIR/.cache/torch_extensions"
 export TMPDIR="$WORKDIR/tmp"
+# MindSpeed checkpoints contain argparse.Namespace metadata and are generated locally.
+# PyTorch 2.6+ otherwise defaults torch.load() to weights_only=True.
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 mkdir -p "$HF_HOME" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
          "$TORCH_EXTENSIONS_DIR" "$TMPDIR"

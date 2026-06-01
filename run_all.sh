@@ -79,6 +79,38 @@ step0_setup() {
         cd "$WORKDIR"
     fi
 
+    # 修复 mindspeed dummy: 预注入 FastSGD 到 sys.modules['apex.optimizers']
+    PATCH_MARKER="$WORKDIR/.apex_patched"
+    if [ ! -f "$PATCH_MARKER" ]; then
+        log_info "修补 apex.optimizers dummy（预注入 FusedSGD）..."
+        SITE_SP=$(python3 -c "import site; print(site.getusersitepackages())")
+        mkdir -p "$SITE_SP"
+        # 写一个 .pth 文件，会自动在 Python 启动时执行
+        cat > "$SITE_SP/fix_apex.pth" <<'PYEOF'
+import sys, types
+# 在 mindspeed 的 dummy 拦截之前，先把 apex.optimizers 注册好
+_opt = types.ModuleType("apex.optimizers")
+_opt.FusedSGD = type('FusedSGD', (), {'__init__': lambda s,*a,**k: None})
+_opt.FusedAdam = type('FusedAdam', (), {'__init__': lambda s,*a,**k: None})
+sys.modules['apex.optimizers'] = _opt
+
+# 同样修复 transformer_engine 可能缺失的导出
+import sys as _sys
+if 'transformer_engine' not in _sys.modules:
+    _te = types.ModuleType("transformer_engine")
+    _sys.modules['transformer_engine'] = _te
+if 'transformer_engine.pytorch' not in _sys.modules:
+    _tep = types.ModuleType("transformer_engine.pytorch")
+    _sys.modules['transformer_engine.pytorch'] = _tep
+if 'transformer_engine.pytorch.distributed' not in _sys.modules:
+    _tepd = types.ModuleType("transformer_engine.pytorch.distributed")
+    _tepd.activation_recompute_forward = lambda *a, **k: None
+    _sys.modules['transformer_engine.pytorch.distributed'] = _tepd
+PYEOF
+        touch "$PATCH_MARKER"
+        log_info "apex/transformer_engine 桩已安装"
+    fi
+
     # --- 0e. openPangu 模型 ---
     MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
     if [ ! -f "$MODEL_DIR/model.safetensors" ]; then

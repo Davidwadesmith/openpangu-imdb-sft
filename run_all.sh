@@ -171,26 +171,40 @@ step0_setup() {
 
     rm -f "$(python -c 'import site; print(site.getusersitepackages())')/fix_apex.pth"
 
-    if [ ! -d "$WORKDIR/openPangu-Embedded-1B-V1.1/.git" ]; then
-        if [ -e "$WORKDIR/openPangu-Embedded-1B-V1.1" ]; then
-            log_error "$WORKDIR/openPangu-Embedded-1B-V1.1 exists but is not a Git checkout"
+    local model_dir="$WORKDIR/openPangu-Embedded-1B-V1.1"
+    local model_weight="$model_dir/model.safetensors"
+    local model_size=0
+
+    if [ ! -d "$model_dir/.git" ]; then
+        if [ -e "$model_dir" ]; then
+            log_error "$model_dir exists but is not a Git checkout"
             exit 1
         fi
         log_info "Cloning openPangu-Embedded-1B-V1.1 from GitCode"
         git clone \
             https://gitcode.com/ascend-tribe/openPangu-Embedded-1B-V1.1.git \
-            "$WORKDIR/openPangu-Embedded-1B-V1.1"
+            "$model_dir"
     else
         log_warn "openPangu model checkout already exists"
     fi
 
-    if [ ! -f "$WORKDIR/openPangu-Embedded-1B-V1.1/model.safetensors" ]; then
-        log_error "Model weight not found: openPangu-Embedded-1B-V1.1/model.safetensors"
+    if [ -f "$model_weight" ]; then
+        model_size="$(stat -c%s "$model_weight" 2>/dev/null || echo 0)"
+    fi
+    if [ "$model_size" -lt 1000000000 ]; then
+        log_warn "Model weight is missing or too small; attempting git lfs pull"
+        git -C "$model_dir" lfs pull || log_warn "git lfs pull failed; checking weight size before stopping"
+        if [ -f "$model_weight" ]; then
+            model_size="$(stat -c%s "$model_weight" 2>/dev/null || echo 0)"
+        fi
+    fi
+    if [ "$model_size" -lt 1000000000 ]; then
+        log_error "Model weight is incomplete: $model_weight ($model_size bytes)"
         exit 1
     fi
 
     log_info "Model weight:"
-    ls -lh "$WORKDIR/openPangu-Embedded-1B-V1.1/model.safetensors"
+    ls -lh "$model_weight"
     source "$WORKDIR/env.sh"
 }
 

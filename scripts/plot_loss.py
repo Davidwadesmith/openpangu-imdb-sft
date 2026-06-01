@@ -1,48 +1,54 @@
 # -*- coding: utf-8 -*-
-"""从训练日志提取 lm loss 并绘制曲线"""
-import os, re
+"""Extract lm loss values from the SFT log and render loss_curve.png."""
+
+import os
+import re
+from pathlib import Path
+
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-work_dir = os.environ.get("WORKDIR", os.path.dirname(os.path.dirname(__file__)))
-loss_log = f"{work_dir}/logs/tune_mcore_pangu_1b_full_ptd.log"
-out_png = f"{work_dir}/loss_curve.png"
 
-loss_list = []
-iter_list = []
+WORKDIR = Path(os.environ.get("WORKDIR", Path(__file__).resolve().parents[1]))
+LOSS_LOG = WORKDIR / "logs" / "tune_mcore_pangu_1b_full_ptd.log"
+OUTPUT_PNG = WORKDIR / "loss_curve.png"
+ITERATION_PATTERN = re.compile(r"iteration\s+(\d+)")
+LOSS_PATTERN = re.compile(r"\|\s*lm loss:\s*([0-9.eE+-]+)")
 
-pattern_iter = re.compile(r"iteration\s+(\d+)")
-pattern_loss = re.compile(r"\|\s*lm loss:\s*([0-9.eE+-]+)")
 
-if not os.path.exists(loss_log):
-    print(f"[WARN] 日志不存在: {loss_log}")
-    exit(0)
+def main() -> None:
+    iterations: list[int] = []
+    losses: list[float] = []
 
-with open(loss_log, "r", encoding="utf-8", errors="ignore") as f:
-    for line in f:
-        m_loss = pattern_loss.search(line)
-        if not m_loss:
-            continue
-        loss = float(m_loss.group(1))
-        m_iter = pattern_iter.search(line)
-        step = int(m_iter.group(1)) if m_iter else len(loss_list) + 1
-        iter_list.append(step)
-        loss_list.append(loss)
+    with LOSS_LOG.open("r", encoding="utf-8", errors="ignore") as log:
+        for line in log:
+            loss_match = LOSS_PATTERN.search(line)
+            if not loss_match:
+                continue
+            iteration_match = ITERATION_PATTERN.search(line)
+            iterations.append(int(iteration_match.group(1)) if iteration_match else len(losses) + 1)
+            losses.append(float(loss_match.group(1)))
 
-if not loss_list:
-    raise RuntimeError("没有从日志中解析到 lm loss。")
+    if not losses:
+        raise RuntimeError(f"No lm loss values found in {LOSS_LOG}")
 
-plt.figure(figsize=(10, 6))
-plt.plot(iter_list, loss_list, linewidth=1.5, label="Training Loss")
-plt.xlabel("Iteration")
-plt.ylabel("LM Loss")
-plt.title("SFT Training Loss Curve")
-plt.grid(True, linestyle="--", alpha=0.7)
-plt.legend()
-plt.tight_layout()
-plt.savefig(out_png, dpi=200)
-print(f"[OK] loss 曲线已保存：{out_png}")
-print(f"[INFO] loss 点数：{len(loss_list)}")
-print(f"[INFO] first loss：{loss_list[0]}")
-print(f"[INFO] last loss：{loss_list[-1]}")
+    plt.figure(figsize=(10, 6))
+    plt.plot(iterations, losses, linewidth=1.5, label="Training Loss")
+    plt.xlabel("Iteration")
+    plt.ylabel("LM Loss")
+    plt.title("SFT Training Loss Curve")
+    plt.grid(True, linestyle="--", alpha=0.7)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(OUTPUT_PNG, dpi=200)
+
+    print(f"[OK] Loss curve saved: {OUTPUT_PNG}")
+    print(f"[INFO] Loss points: {len(losses)}")
+    print(f"[INFO] First loss: {losses[0]}")
+    print(f"[INFO] Last loss: {losses[-1]}")
+
+
+if __name__ == "__main__":
+    main()

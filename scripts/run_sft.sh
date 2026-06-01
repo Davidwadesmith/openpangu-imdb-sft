@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-source "${WORKDIR:-$(dirname "$0")/..}/env.sh"
-export PATH=/home/service/.local/bin:$PATH
 
-echo "[INFO] run_sft.sh started"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../env.sh"
+export PATH=/home/service/.local/bin:$PATH
 
 SEQ_LENGTH="${SEQ_LENGTH:-4096}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-4}"
@@ -14,9 +14,10 @@ MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
 CKPT_LOAD_DIR="$WORKDIR/ckpt/mcore"
 CKPT_SAVE_DIR="$WORKDIR/sft_output"
 LOG_DIR="$WORKDIR/logs"
+LOG_FILE="$LOG_DIR/tune_mcore_pangu_1b_full_ptd.log"
+
 mkdir -p "$CKPT_SAVE_DIR" "$LOG_DIR"
 
-# 自动检测缓存文件前缀
 if [ -f "$WORKDIR/cache/sft_packed_attention_mask_document.bin" ]; then
     DATA_PREFIX="$WORKDIR/cache/sft_packed_attention_mask_document"
 elif [ -f "$WORKDIR/cache/sft_packed_text_document.bin" ]; then
@@ -24,34 +25,34 @@ elif [ -f "$WORKDIR/cache/sft_packed_text_document.bin" ]; then
 elif [ -f "$WORKDIR/cache/sft_text_document.bin" ]; then
     DATA_PREFIX="$WORKDIR/cache/sft_text_document"
 else
-    DATA_PREFIX=$(find "$WORKDIR/cache" -maxdepth 1 -name "*.bin" | head -n 1 | sed 's/\.bin$//')
+    DATA_PREFIX="$(find "$WORKDIR/cache" -maxdepth 1 -type f -name "*.bin" -print -quit | sed 's/\.bin$//')"
 fi
 
 if [ -z "$DATA_PREFIX" ] || [ ! -f "${DATA_PREFIX}.bin" ] || [ ! -f "${DATA_PREFIX}.idx" ]; then
-    echo "[ERROR] 没找到 .bin/.idx 缓存。当前 cache:"
+    echo "[ERROR] No usable .bin/.idx cache found under $WORKDIR/cache"
     find "$WORKDIR/cache" -maxdepth 1 -type f -exec ls -lh {} \;
     exit 1
 fi
 
 if [ ! -d "$CKPT_LOAD_DIR" ]; then
-    echo "[ERROR] mcore checkpoint 不存在: $CKPT_LOAD_DIR"
+    echo "[ERROR] Initial mcore checkpoint not found: $CKPT_LOAD_DIR"
     exit 1
 fi
 
-cd "$WORKDIR/MindSpeed-LLM"
-LOG_FILE="$LOG_DIR/tune_mcore_pangu_1b_full_ptd.log"
 if [ -f "$LOG_FILE" ]; then
     cp "$LOG_FILE" "$LOG_FILE.before_$(date '+%Y%m%d_%H%M%S')"
 fi
 
+echo "[INFO] run_sft.sh started"
 echo "[INFO] DATA_PREFIX=$DATA_PREFIX"
 echo "[INFO] CKPT_LOAD_DIR=$CKPT_LOAD_DIR"
 echo "[INFO] CKPT_SAVE_DIR=$CKPT_SAVE_DIR"
-echo "[INFO] SEQ=$SEQ_LENGTH GBS=$GLOBAL_BATCH_SIZE ITERS=$TRAIN_ITERS LR=$LR"
+echo "[INFO] SEQ_LENGTH=$SEQ_LENGTH GLOBAL_BATCH_SIZE=$GLOBAL_BATCH_SIZE TRAIN_ITERS=$TRAIN_ITERS LR=$LR"
 echo "[INFO] START_TIME=$(date '+%F %T')" | tee "$LOG_FILE"
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
+cd "$WORKDIR/MindSpeed-LLM"
 torchrun --nproc_per_node 1 pretrain_gpt.py \
     --tensor-model-parallel-size 1 \
     --pipeline-model-parallel-size 1 \
@@ -110,4 +111,4 @@ torchrun --nproc_per_node 1 pretrain_gpt.py \
     2>&1 | tee -a "$LOG_FILE"
 
 echo "[INFO] END_TIME=$(date '+%F %T')" | tee -a "$LOG_FILE"
-echo "[OK] SFT 完成，日志：$LOG_FILE"
+echo "[OK] SFT completed: $LOG_FILE"

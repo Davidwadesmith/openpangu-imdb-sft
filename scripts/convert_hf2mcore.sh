@@ -1,15 +1,16 @@
 #!/bin/bash
 set -euo pipefail
-source "${WORKDIR:-$(dirname "$0")/..}/env.sh"
-export PATH=/home/service/.local/bin:$PATH
 
-echo "[INFO] convert_hf2mcore.sh started"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../env.sh"
+export PATH=/home/service/.local/bin:$PATH
 
 MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
 OUT_DIR="$WORKDIR/ckpt/mcore"
+
+echo "[INFO] convert_hf2mcore.sh started"
 mkdir -p "$OUT_DIR"
 
-echo "[INFO] 模型目录:"
 ls -ld "$MODEL_DIR"
 find "$MODEL_DIR" -maxdepth 2 -type f \( -name "*.safetensors" -o -name "*.bin" \) -exec ls -lh {} \;
 
@@ -26,5 +27,5 @@ python convert_ckpt.py \
     --params-dtype bf16 \
     --use-mcore-models
 
-echo "[OK] HF -> mcore 转换完成：$OUT_DIR"
-find "$OUT_DIR" -maxdepth 3 -type f | head -n 20
+echo "[OK] HF -> mcore conversion completed: $OUT_DIR"
+find "$OUT_DIR" -maxdepth 3 -type f -print

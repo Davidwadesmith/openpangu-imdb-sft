@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-source "${WORKDIR:-$(dirname "$0")/..}/env.sh"
+shopt -s nullglob
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../env.sh"
 export PATH=/home/service/.local/bin:$PATH
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -11,25 +14,46 @@ export MAX_JOBS=1
 MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
 SFT_DIR="$WORKDIR/sft_output"
 HF_OUT="$WORKDIR/ckpt/mg2hf"
+INFERENCE_DIR="$HF_OUT/mg2hf"
 
-echo "[INFO] 清空旧 mg2hf"
+copy_model_shell() {
+    local destination="$1"
+    local file
+    for file in \
+        "$MODEL_DIR"/*.json \
+        "$MODEL_DIR"/*.model \
+        "$MODEL_DIR"/*.py \
+        "$MODEL_DIR"/*.tiktoken \
+        "$MODEL_DIR"/*.safetensors \
+        "$MODEL_DIR"/*.bin \
+        "$MODEL_DIR"/*.index.json; do
+        cp -f "$file" "$destination/"
+    done
+}
+
+copy_metadata() {
+    local destination="$1"
+    local file
+    for file in \
+        "$MODEL_DIR"/*.json \
+        "$MODEL_DIR"/*.model \
+        "$MODEL_DIR"/*.py \
+        "$MODEL_DIR"/*.tiktoken; do
+        cp -f "$file" "$destination/"
+    done
+}
+
+echo "[INFO] Recreating Hugging Face export directory: $HF_OUT"
 rm -rf "$HF_OUT"
 mkdir -p "$HF_OUT"
 
-echo "[INFO] 转换前复制完整 HF 模型文件（含 model.safetensors）"
-cp -f "$MODEL_DIR"/*.json "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.model "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.py "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.tiktoken "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.safetensors "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.bin "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.index.json "$HF_OUT"/ 2>/dev/null || true
+echo "[INFO] Copying the base Hugging Face model shell"
+copy_model_shell "$HF_OUT"
 
-echo "[INFO] SFT checkpoint 内容:"
-find "$SFT_DIR" -maxdepth 5 -type f -exec ls -lh {} \; | head -n 80
+echo "[INFO] SFT checkpoint files:"
+find "$SFT_DIR" -maxdepth 5 -type f -exec ls -lh {} \;
 
 cd "$WORKDIR/MindSpeed-LLM"
-echo "[INFO] 开始 mcore -> HF 转换"
 python convert_ckpt.py \
     --model-type GPT \
     --load-model-type mg \
@@ -40,29 +64,17 @@ python convert_ckpt.py \
     --target-pipeline-parallel-size 1 \
     --use-mcore-models
 
-echo "[INFO] 转换后补齐 tokenizer/config/code 文件"
-cp -f "$MODEL_DIR"/*.json "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.model "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.py "$HF_OUT"/ 2>/dev/null || true
-cp -f "$MODEL_DIR"/*.tiktoken "$HF_OUT"/ 2>/dev/null || true
+echo "[INFO] Copying tokenizer/config/code files into the inference directory"
+mkdir -p "$INFERENCE_DIR"
+copy_metadata "$HF_OUT"
+copy_metadata "$INFERENCE_DIR"
 
-echo "[INFO] mg2hf 文件列表:"
-find "$HF_OUT" -maxdepth 2 -type f -exec ls -lh {} \;
+echo "[INFO] Inference model files:"
+find "$INFERENCE_DIR" -maxdepth 1 -type f -exec ls -lh {} \;
 
-if ! find "$HF_OUT" -maxdepth 2 -type f \( -name "*.bin" -o -name "*.safetensors" \) | grep -q .; then
-    echo "[ERROR] 转换结束但没有权重文件。"
+if ! find "$INFERENCE_DIR" -maxdepth 1 -type f \( -name "*.bin" -o -name "*.safetensors" \) | grep -q .; then
+    echo "[ERROR] Converted inference weights not found under $INFERENCE_DIR"
     exit 1
 fi
 
-# 真正用于推理的模型在 mg2hf/mg2hf 子目录
-INFERENCE_DIR="$HF_OUT/mg2hf"
-mkdir -p "$INFERENCE_DIR"
-echo "[INFO] 补齐推理目录: $INFERENCE_DIR"
-# 只复制 config/tokenizer 文件，不复制 model.safetensors（避免覆盖转换后的）
-for f in "$HF_OUT"/*.json "$HF_OUT"/*.model "$HF_OUT"/*.py "$HF_OUT"/*.tiktoken; do
-    [ -f "$f" ] && cp -f "$f" "$INFERENCE_DIR/"
-done
-echo "[INFO] 推理目录:"
-ls -lh "$INFERENCE_DIR/"
-
-echo "[OK] mcore -> HF 转换完成。推理模型: $INFERENCE_DIR"
+echo "[OK] mcore -> HF conversion completed: $INFERENCE_DIR"

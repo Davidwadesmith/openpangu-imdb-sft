@@ -1,167 +1,246 @@
 #!/bin/bash
 set -euo pipefail
 
-# ============================================================
-#  openPangu-1B IMDB 情感分类 SFT — 一键运行脚本
-#  用法: bash run_all.sh
-#  首次运行会自动搭建虚拟环境、下载所有依赖
-#  后续运行会跳过已完成步骤
-# ============================================================
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+
 log_info()  { echo -e "${GREEN}[INFO]${NC}  $(date '+%H:%M:%S') $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
 
-WORKDIR="$(cd "$(dirname "$0")" && pwd)"
+WORKDIR="${WORKDIR:-$(cd "$(dirname "$0")" && pwd)}"
 export WORKDIR
 SCRIPTS_DIR="$WORKDIR/scripts"
+
 mkdir -p "$WORKDIR/cache" "$WORKDIR/ckpt" "$WORKDIR/sft_output" \
-         "$WORKDIR/logs" "$WORKDIR/results" "$WORKDIR/downloads" "$WORKDIR/data"
+         "$WORKDIR/logs" "$WORKDIR/results" "$WORKDIR/downloads" \
+         "$WORKDIR/data" "$WORKDIR/tmp"
 
-# ===== 环境加载 =====
-if [ -f "$WORKDIR/env.sh" ]; then
-    source "$WORKDIR/env.sh"
-fi
+source "$WORKDIR/env.sh"
 
-# ============================================================
-#  Step 0: 环境搭建（首次运行）
-# ============================================================
-step0_setup() {
-    log_info "============================================="
-    log_info "Step 0: 环境搭建"
-    log_info "============================================="
+ensure_git_checkout() {
+    local name="$1"
+    local url="$2"
+    local revision="$3"
+    local target="$WORKDIR/$name"
 
-    # --- 0a. 虚拟环境 ---
-    if [ ! -f "$WORKDIR/.venv/bin/activate" ]; then
-        log_info "创建虚拟环境..."
-        python3.10 -m venv --system-site-packages "$WORKDIR/.venv"
-        source "$WORKDIR/.venv/bin/activate"
-        pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple -q
-        pip install ninja pybind11 transformers==4.53.2 datasets pandas \
-            pyarrow matplotlib tqdm sentencepiece safetensors \
-            -i https://pypi.tuna.tsinghua.edu.cn/simple -q
-    else
-        source "$WORKDIR/.venv/bin/activate"
+    if [ ! -d "$target/.git" ]; then
+        if [ -e "$target" ]; then
+            log_error "$target exists but is not a Git checkout"
+            exit 1
+        fi
+        log_info "Cloning $name..."
+        git clone "$url" "$target"
     fi
 
-    # --- 0b. MindSpeed-LLM 1.0.0 ---
-    if [ ! -f "$WORKDIR/MindSpeed-LLM/convert_ckpt.py" ]; then
-        log_info "克隆 MindSpeed-LLM 1.0.0..."
-        git clone https://gitee.com/ascend/MindSpeed-LLM.git "$WORKDIR/MindSpeed-LLM"
-        cd "$WORKDIR/MindSpeed-LLM"
-        git checkout 1.0.0
-        cd "$WORKDIR"
+    log_info "Checking out $name revision $revision"
+    git -C "$target" checkout "$revision"
+}
+
+embed_megatron() {
+    local marker="$WORKDIR/.megatron_core_r0.6.0_embedded"
+
+    if [ -f "$marker" ] && [ -d "$WORKDIR/MindSpeed-LLM/megatron/core" ]; then
+        log_warn "Megatron core_r0.6.0 already embedded"
+        return
     fi
 
-    # --- 0c. Megatron-LM core_r0.6.0 + 嵌入 ---
-    MEG_DIR="$WORKDIR/MindSpeed-LLM/megatron"
-    if [ ! -d "$MEG_DIR/core" ]; then
-        log_info "克隆 Megatron-LM core_r0.6.0..."
-        git clone https://gitee.com/mirrors/Megatron-LM.git "$WORKDIR/Megatron-LM"
-        cd "$WORKDIR/Megatron-LM"
-        git checkout core_r0.6.0
-        cd "$WORKDIR"
-        rm -rf "$WORKDIR/MindSpeed-LLM/megatron"
-        cp -r "$WORKDIR/Megatron-LM/megatron" "$WORKDIR/MindSpeed-LLM/"
-        log_info "Megatron 已嵌入 MindSpeed-LLM"
+    log_info "Embedding Megatron-LM core_r0.6.0 into MindSpeed-LLM"
+    rm -rf "$WORKDIR/MindSpeed-LLM/megatron"
+    cp -r "$WORKDIR/Megatron-LM/megatron" "$WORKDIR/MindSpeed-LLM/"
+    touch "$marker"
+}
+
+patch_megatron_compatibility() {
+    local marker="$WORKDIR/.megatron_compatibility_patched"
+
+    if [ -f "$marker" ]; then
+        log_warn "Megatron compatibility patches already applied"
+        return
     fi
 
-    # --- 0d. MindSpeed 稳定 commit ---
-    if [ ! -f "$WORKDIR/MindSpeed/setup.py" ]; then
-        log_info "克隆 MindSpeed..."
-        git clone https://gitee.com/ascend/MindSpeed.git "$WORKDIR/MindSpeed"
-        cd "$WORKDIR/MindSpeed"
-        git checkout 969686ff
-        cd "$WORKDIR"
-    fi
+    log_info "Applying Megatron apex/transformer_engine compatibility patches"
+    python - <<'PY'
+import os
+from pathlib import Path
 
-    # 修复 Megatron 对 apex/transformer_engine 的硬依赖
-    FIX_MARKER="$WORKDIR/.megatron_patched"
-    if [ ! -f "$FIX_MARKER" ]; then
-        log_info "补丁: 移除 Megatron 的 apex/transformer_engine 硬依赖..."
-        python3 <<'PYPATCH'
-import os, re
 
-def patch_file(path, old, new):
-    if not os.path.isfile(path):
-        return False
-    with open(path) as f:
-        c = f.read()
-    if old not in c:
-        return False
-    c = c.replace(old, new)
-    with open(path, 'w') as f:
-        f.write(c)
-    print(f'  patched {os.path.basename(path)}')
-    return True
+def patch_file(relative_path: str, old: str, new: str, patched_marker: str) -> None:
+    path = Path(os.environ["WORKDIR"]) / "MindSpeed-LLM" / "megatron" / "core" / relative_path
+    text = path.read_text(encoding="utf-8")
+    if old in text:
+        path.write_text(text.replace(old, new), encoding="utf-8")
+        print(f"  patched {relative_path}")
+        return
+    if patched_marker in text:
+        print(f"  already patched {relative_path}")
+        return
+    raise RuntimeError(f"Expected patch location not found: {path}")
 
-work = os.environ['WORKDIR']
-meg = f'{work}/MindSpeed-LLM/megatron/core'
 
-# 1) optimizer/__init__.py
-patch_file(f'{meg}/optimizer/__init__.py',
-    'from apex.optimizers import FusedSGD as SGD',
-    '''try:
+patch_file(
+    "optimizer/__init__.py",
+    "from apex.optimizers import FusedSGD as SGD",
+    """try:
     from apex.optimizers import FusedSGD as SGD
 except (ImportError, AttributeError):
     class SGD:
-        def __init__(self, *a, **kw):
-            pass''')
-
-# 2) distrib_optimizer.py
-patch_file(f'{meg}/optimizer/distrib_optimizer.py',
-    'HAVE_APEX_OR_TE = True', 'HAVE_APEX_OR_TE = False')
-
-# 3) tensor_parallel/random.py
-patch_file(f'{meg}/tensor_parallel/random.py',
-    'from transformer_engine.pytorch.distributed import activation_recompute_forward',
-    '''try:
+        def __init__(self, *args, **kwargs):
+            pass""",
+    "except (ImportError, AttributeError):",
+)
+patch_file(
+    "optimizer/distrib_optimizer.py",
+    "HAVE_APEX_OR_TE = True",
+    "HAVE_APEX_OR_TE = False",
+    "HAVE_APEX_OR_TE = False",
+)
+patch_file(
+    "tensor_parallel/random.py",
+    "from transformer_engine.pytorch.distributed import activation_recompute_forward",
+    """try:
     from transformer_engine.pytorch.distributed import activation_recompute_forward
 except ImportError:
-    def activation_recompute_forward(*a, **k):
-        raise NotImplementedError''')
-
-# 4) extensions/transformer_engine.py
-patch_file(f'{meg}/extensions/transformer_engine.py',
-    'from transformer_engine.pytorch.distributed import activation_recompute_forward',
-    '''try:
+    def activation_recompute_forward(*args, **kwargs):
+        raise NotImplementedError""",
+    "def activation_recompute_forward(*args, **kwargs):",
+)
+patch_file(
+    "extensions/transformer_engine.py",
+    "from transformer_engine.pytorch.distributed import activation_recompute_forward",
+    """try:
     from transformer_engine.pytorch.distributed import activation_recompute_forward
 except ImportError:
-    def activation_recompute_forward(*a, **k):
-        raise NotImplementedError''')
+    def activation_recompute_forward(*args, **kwargs):
+        raise NotImplementedError""",
+    "def activation_recompute_forward(*args, **kwargs):",
+)
+PY
+    touch "$marker"
+}
 
-print('megatron patches done')
-PYPATCH
-        touch "$FIX_MARKER"
+step0_setup() {
+    log_info "============================================="
+    log_info "Step 0/9: Environment and repositories"
+    log_info "============================================="
+    log_info "Working directory: $WORKDIR"
+
+    if [ ! -f "$WORKDIR/.venv/bin/activate" ]; then
+        log_info "Creating Python 3.10 virtual environment"
+        python3.10 -m venv --system-site-packages "$WORKDIR/.venv"
+    else
+        log_warn "Python virtual environment already exists"
     fi
 
-    rm -f "$(python3 -c "import site; print(site.getusersitepackages())")/fix_apex.pth"
+    source "$WORKDIR/.venv/bin/activate"
+    python -m pip install --upgrade pip \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple
+    python -m pip install \
+        ninja \
+        pybind11 \
+        transformers==4.53.2 \
+        datasets \
+        pandas \
+        pyarrow \
+        matplotlib \
+        tqdm \
+        sentencepiece \
+        safetensors \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-    # --- 0e. openPangu 模型 ---
-    MODEL_DIR="$WORKDIR/openPangu-Embedded-1B-V1.1"
-    if [ ! -f "$MODEL_DIR/model.safetensors" ]; then
-        log_info "下载 openPangu-1B 模型..."
-        git clone https://gitcode.com/ascend-tribe/openPangu-Embedded-1B-V1.1.git "$MODEL_DIR"
+    ensure_git_checkout \
+        MindSpeed-LLM \
+        https://gitee.com/ascend/MindSpeed-LLM.git \
+        1.0.0
+    ensure_git_checkout \
+        Megatron-LM \
+        https://gitee.com/mirrors/Megatron-LM.git \
+        core_r0.6.0
+    ensure_git_checkout \
+        MindSpeed \
+        https://gitee.com/ascend/MindSpeed.git \
+        969686ff
+
+    embed_megatron
+    patch_megatron_compatibility
+
+    rm -f "$(python -c 'import site; print(site.getusersitepackages())')/fix_apex.pth"
+
+    if [ ! -d "$WORKDIR/openPangu-Embedded-1B-V1.1/.git" ]; then
+        if [ -e "$WORKDIR/openPangu-Embedded-1B-V1.1" ]; then
+            log_error "$WORKDIR/openPangu-Embedded-1B-V1.1 exists but is not a Git checkout"
+            exit 1
+        fi
+        log_info "Cloning openPangu-Embedded-1B-V1.1 from GitCode"
+        git clone \
+            https://gitcode.com/ascend-tribe/openPangu-Embedded-1B-V1.1.git \
+            "$WORKDIR/openPangu-Embedded-1B-V1.1"
+    else
+        log_warn "openPangu model checkout already exists"
     fi
-    MODEL_SIZE=$(stat -c%s "$MODEL_DIR/model.safetensors" 2>/dev/null || echo 0)
-    log_info "模型权重: $MODEL_DIR/model.safetensors ($(( MODEL_SIZE / 1024 / 1024 / 1024 ))GB)"
 
-    # --- 0f. 编译 Megatron helpers ---
-    HELPERS_SO="$WORKDIR/MindSpeed-LLM/megatron/core/datasets/helpers.cpython-310-aarch64-linux-gnu.so"
-    if [ ! -f "$HELPERS_SO" ]; then
-        log_info "编译 Megatron helpers..."
-        pip install ninja pybind11 -i https://pypi.tuna.tsinghua.edu.cn/simple -q
+    if [ ! -f "$WORKDIR/openPangu-Embedded-1B-V1.1/model.safetensors" ]; then
+        log_error "Model weight not found: openPangu-Embedded-1B-V1.1/model.safetensors"
+        exit 1
+    fi
+
+    log_info "Model weight:"
+    ls -lh "$WORKDIR/openPangu-Embedded-1B-V1.1/model.safetensors"
+    source "$WORKDIR/env.sh"
+}
+
+step1_prepare_data() {
+    log_info "Step 1/9: Download and convert IMDB"
+
+    if [ -f "$WORKDIR/downloads/train-00000-of-00001.parquet" ] && \
+       [ -f "$WORKDIR/downloads/test-00000-of-00001.parquet" ] && \
+       [ -f "$WORKDIR/data/train_imdb.jsonl" ]; then
+        log_warn "IMDB parquet and training JSONL already exist"
+        return
+    fi
+
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/prepare_data.py"
+}
+
+step2_preprocess() {
+    log_info "Step 2/9: Preprocess training data"
+
+    local bin_file
+    while IFS= read -r bin_file; do
+        if [ -f "${bin_file%.bin}.idx" ]; then
+            log_warn "Preprocessed .bin/.idx cache already exists"
+            return
+        fi
+    done < <(find "$WORKDIR/cache" -maxdepth 1 -type f -name "*.bin")
+
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/preprocess.sh"
+}
+
+step3_compile_helpers() {
+    log_info "Step 3/9: Compile Megatron dataset helpers"
+    source "$WORKDIR/env.sh"
+
+    if (
         cd "$WORKDIR/MindSpeed-LLM"
-        cat > build_megatron_helpers.py <<'PYEOF'
+        python - <<'PY'
+from megatron.core.datasets import helpers
+print(f"[OK] Megatron helpers importable: {helpers}")
+PY
+    ); then
+        log_warn "Megatron helpers already compiled"
+        return
+    fi
+
+    cd "$WORKDIR/MindSpeed-LLM"
+    cat > build_megatron_helpers.py <<'PY'
 from setuptools import setup
-from torch.utils.cpp_extension import CppExtension, BuildExtension
-import os, sys
-# 确保 megatron 在 sys.path
-sys.path.insert(0, ".")
+from torch.utils.cpp_extension import BuildExtension, CppExtension
+
+
 setup(
     name="megatron_core_datasets_helpers",
     ext_modules=[
@@ -173,105 +252,67 @@ setup(
     ],
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
 )
-PYEOF
-        python build_megatron_helpers.py build_ext --inplace
-        cd "$WORKDIR"
-    fi
-
-    source "$WORKDIR/env.sh"
-    log_info "Step 0 完成"
+PY
+    python build_megatron_helpers.py build_ext --inplace
+    python - <<'PY'
+from megatron.core.datasets import helpers
+print(f"[OK] Megatron helpers importable: {helpers}")
+PY
+    cd "$WORKDIR"
 }
 
-# ============================================================
-#  Step 1: 数据下载与转换
-# ============================================================
-step1_prepare_data() {
-    log_info "Step 1/8: 数据下载与格式转换..."
-    if [ -f "$WORKDIR/data/train_imdb.jsonl" ]; then
-        log_warn "train_imdb.jsonl 已存在，跳过"
-        return
-    fi
-    source "$WORKDIR/env.sh"
-    python "$SCRIPTS_DIR/prepare_data.py"
-}
+step4_convert_hf2mcore() {
+    log_info "Step 4/9: Convert Hugging Face checkpoint to mcore"
 
-# ============================================================
-#  Step 2: 数据预处理
-# ============================================================
-step2_preprocess() {
-    log_info "Step 2/8: 数据预处理..."
-    local cache="$WORKDIR/cache"
-    if ls "$cache"/*.bin "$cache"/*.idx 2>/dev/null | head -1 | grep -q .; then
-        log_warn "缓存已存在，跳过"
-        return
-    fi
-    source "$WORKDIR/env.sh"
-    bash "$SCRIPTS_DIR/preprocess.sh"
-}
-
-# ============================================================
-#  Step 3: HF → mcore 转换
-# ============================================================
-step3_convert_hf2mcore() {
-    log_info "Step 3/8: HF → mcore 权重转换..."
     if [ -f "$WORKDIR/ckpt/mcore/latest_checkpointed_iteration.txt" ]; then
-        log_warn "mcore 权重已存在，跳过"
+        log_warn "Initial mcore checkpoint already exists"
         return
     fi
+
     source "$WORKDIR/env.sh"
     bash "$SCRIPTS_DIR/convert_hf2mcore.sh"
 }
 
-# ============================================================
-#  Step 4: SFT 训练
-# ============================================================
-step4_train() {
-    log_info "Step 4/8: SFT 训练..."
-    log_info "  SEQ=4096 GBS=4 ITERS=300 LR=1e-5"
+step5_train() {
+    log_info "Step 5/9: Run SFT training"
+
+    if [ -f "$WORKDIR/sft_output/latest_checkpointed_iteration.txt" ]; then
+        log_warn "SFT checkpoint already exists"
+        return
+    fi
+
     source "$WORKDIR/env.sh"
     bash "$SCRIPTS_DIR/run_sft.sh"
 }
 
-# ============================================================
-#  Step 5: mcore → HF 转换
-# ============================================================
-step5_convert_mcore2hf() {
-    log_info "Step 5/8: mcore → HF 转换..."
-    source "$WORKDIR/env.sh"
-    bash "$SCRIPTS_DIR/convert_mcore2hf.sh"
-}
-
-# ============================================================
-#  Step 6: 推理
-# ============================================================
-step6_inference() {
-    log_info "Step 6/8: 推理..."
-    source "$WORKDIR/env.sh"
-    python "$SCRIPTS_DIR/inference.py"
-}
-
-# ============================================================
-#  Step 7: 评测
-# ============================================================
-step7_evaluate() {
-    log_info "Step 7/8: 评测准确率..."
-    source "$WORKDIR/env.sh"
-    python "$SCRIPTS_DIR/evaluate.py"
-}
-
-# ============================================================
-#  Step 8: 绘制 loss 曲线
-# ============================================================
-step8_plot_loss() {
-    log_info "Step 8/8: 绘制 loss 曲线..."
+step6_plot_loss() {
+    log_info "Step 6/9: Plot training loss"
     source "$WORKDIR/env.sh"
     python "$SCRIPTS_DIR/plot_loss.py"
 }
 
-# ============================================================
-#  主流程
-# ============================================================
+step7_convert_mcore2hf() {
+    log_info "Step 7/9: Convert trained mcore checkpoint to Hugging Face"
+    source "$WORKDIR/env.sh"
+    bash "$SCRIPTS_DIR/convert_mcore2hf.sh"
+}
+
+step8_inference() {
+    log_info "Step 8/9: Run full IMDB test-set inference"
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/inference.py"
+}
+
+step9_evaluate() {
+    log_info "Step 9/9: Evaluate sentiment predictions"
+    source "$WORKDIR/env.sh"
+    python "$SCRIPTS_DIR/evaluate.py"
+}
+
 main() {
+    local start_time
+    local end_time
+
     echo ""
     echo "============================================"
     echo "  openPangu-1B IMDB SFT"
@@ -279,21 +320,22 @@ main() {
     echo "============================================"
     echo ""
 
-    START_TIME=$(date +%s)
+    start_time="$(date +%s)"
 
     step0_setup
     step1_prepare_data
     step2_preprocess
-    step3_convert_hf2mcore
-    step4_train
-    step5_convert_mcore2hf
-    step6_inference
-    step7_evaluate
-    step8_plot_loss
+    step3_compile_helpers
+    step4_convert_hf2mcore
+    step5_train
+    step6_plot_loss
+    step7_convert_mcore2hf
+    step8_inference
+    step9_evaluate
 
-    END_TIME=$(date +%s)
-    log_info "总耗时: $(( (END_TIME - START_TIME) / 60 )) 分 $(( (END_TIME - START_TIME) % 60 )) 秒"
-    log_info "全部完成!"
+    end_time="$(date +%s)"
+    log_info "Total duration: $(( (end_time - start_time) / 60 ))m $(( (end_time - start_time) % 60 ))s"
+    log_info "All steps completed"
 }
 
 main "$@"
